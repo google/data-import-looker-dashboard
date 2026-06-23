@@ -45,6 +45,36 @@ echo "=========================================================="
 echo ""
 
 # ----------------------------------------------------------
+# Disclaimer and Terms Acknowledgment
+# ----------------------------------------------------------
+cat << 'EOF'
+Project Overview: The Exchange Online Data Import Analytics Dashboard project provides an automated deployment solution for monitoring of large-scale migrations using BigQuery and Looker Studio.
+
+Data Accuracy Notice: The dashboard is offered "AS-IS" as an experimental feature and should not be relied on for business outcomes or hard migration timelines. The accuracy of the dashboard may vary and relies on, among other things, a correct BigQuery export setup and the underlying data within the customer's instance. The customer maintains full control over this configuration and data, the dashboard cannot guarantee migration statistics.
+
+Monetary Cost Warning: Executing the deployment script provisions resources within your Google Cloud Project that incur real-time costs. By using these tools, you acknowledge sole responsibility for all financial obligations resulting from Google Cloud Platform.
+EOF
+
+echo ""
+while true; do
+    read -p "Please select 'Y' to acknowledge the terms in the LICENSE and README and  move forward or 'N' to exit: " ack_choice
+    case "$ack_choice" in
+        [Yy]* )
+            echo "Acknowledged. Proceeding..."
+            echo ""
+            break
+            ;;
+        [Nn]* )
+            echo "Exiting deployment."
+            exit 0
+            ;;
+        * )
+            echo "Invalid selection. Please enter 'Y' to acknowledge and proceed, or 'N' to exit."
+            ;;
+    esac
+done
+
+# ----------------------------------------------------------
 # 1. Inputs
 # ----------------------------------------------------------
 read -p "Enter your Google Cloud Project ID: " PROJECT_ID
@@ -78,8 +108,12 @@ START_TIME=$(date +%s)
 # 2. Enable Required APIs
 # ----------------------------------------------------------
 echo "⚡ Enabling required Google Cloud APIs..."
-gcloud services enable bigqueryreservation.googleapis.com --project "$PROJECT_ID" 2>/dev/null
-gcloud services enable bigquerydatatransfer.googleapis.com --project "$PROJECT_ID" 2>/dev/null
+if ! gcloud services enable bigqueryreservation.googleapis.com --project "$PROJECT_ID"; then
+    handle_failure "Failed to enable bigqueryreservation.googleapis.com API. Please check your permissions." && continue
+fi
+if ! gcloud services enable bigquerydatatransfer.googleapis.com --project "$PROJECT_ID"; then
+    handle_failure "Failed to enable bigquerydatatransfer.googleapis.com API. Please check your permissions." && continue
+fi
 echo ""
 
 # ----------------------------------------------------------
@@ -132,24 +166,25 @@ else
 
     # Delete existing scheduled query with same name if it exists
     echo "🔍 Checking for existing scheduled query with name '$DISPLAY_NAME'..."
-    EXISTING_CONFIGS=$(bq --format=json ls --transfer_config --transfer_location="$BQ_LOCATION" --filter="dataSourceIds:scheduled_query" --project_id="$PROJECT_ID" 2>/dev/null)
+    if ! EXISTING_CONFIGS=$(bq --format=json ls --transfer_config --transfer_location="$BQ_LOCATION" --filter="dataSourceIds:scheduled_query" --project_id="$PROJECT_ID"); then
+        handle_failure "Failed to check existing scheduled queries. Please verify your permissions." && continue
+    fi
     
     if [[ -n "$EXISTING_CONFIGS" ]]; then
         CONFIGS_TO_DELETE=$(echo "$EXISTING_CONFIGS" | jq -r --arg name "$DISPLAY_NAME" '.. | objects | select(.displayName == $name) | .name' 2>/dev/null)
         
         if [[ -n "$CONFIGS_TO_DELETE" && "$CONFIGS_TO_DELETE" != "null" ]]; then
-            # Read matching configs into an array to avoid stdin issues with loop
-            mapfile -t config_array <<< "$CONFIGS_TO_DELETE"
-            for config in "${config_array[@]}"; do
+            # Read matching configs line-by-line (compatible with Bash 3.2+ on macOS)
+            while IFS= read -r config; do
                 if [[ -n "$config" && "$config" != "null" ]]; then
                     echo "🗑️ Found existing scheduled query: $config. Deleting..."
-                    if bq rm -f --transfer_config "$config"; then
+                    if bq rm -f --transfer_config "$config" < /dev/null; then
                         echo "✅ Existing scheduled query deleted: $config"
                     else
                         echo "⚠️ Warning: Failed to delete existing scheduled query: $config. Attempting to proceed..."
                     fi
                 fi
-            done
+            done <<< "$CONFIGS_TO_DELETE"
         else
             echo "ℹ️ No existing scheduled query with name '$DISPLAY_NAME' found."
         fi
@@ -165,7 +200,7 @@ else
       --data_source="scheduled_query" \
       --schedule="$SCHEDULE" \
       --params="$PARAMS" \
-      --force 2>/dev/null; then
+      --force; then
         echo "✅ Schedule created successfully!"
     else
         handle_failure "Failed to create scheduled query." && continue

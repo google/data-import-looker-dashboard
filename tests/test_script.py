@@ -240,7 +240,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_happy_path(self):
         self.setup_standard_mocks()
         
-        inputs = "my-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0, f"Script failed with stderr:\n{stderr}")
@@ -275,7 +275,7 @@ class TestDeploymentScript(unittest.TestCase):
 
     def test_empty_project_id_validation(self):
         self.setup_standard_mocks()
-        inputs = "\n\nmy-test-project\n\n\n\n"
+        inputs = "Y\n\n\nmy-test-project\n\n\n\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0)
@@ -286,7 +286,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.setup_standard_mocks()
         os.remove(self.ddl_path)
         
-        inputs = "my-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 1)
@@ -296,7 +296,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_jq_missing(self):
         self.setup_standard_mocks(include_jq=False)
         
-        inputs = "my-test-project\n\n\n\n"
+        inputs = "Y\nmy-test-project\n\n\n\n"
         returncode, stdout, stderr = self.run_script(inputs)
         
         self.assertEqual(returncode, 0)
@@ -309,7 +309,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_ddl_failure_exit(self):
         self.setup_standard_mocks()
         
-        inputs = "my-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_DDL_FAIL": "1"})
         
         self.assertEqual(returncode, 1)
@@ -319,7 +319,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_dml_failure_exit(self):
         self.setup_standard_mocks()
         
-        inputs = "my-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_DML_FAIL": "1"})
         
         self.assertEqual(returncode, 1)
@@ -329,7 +329,7 @@ class TestDeploymentScript(unittest.TestCase):
     def test_schedule_creation_failure_exit(self):
         self.setup_standard_mocks()
         
-        inputs = "my-test-project\n\n\n\ne\n"
+        inputs = "Y\nmy-test-project\n\n\n\ne\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_MK_FAIL": "1"})
         
         self.assertEqual(returncode, 1)
@@ -339,7 +339,7 @@ class TestDeploymentScript(unittest.TestCase):
         self.setup_standard_mocks()
         
         # User answers 'r' to retry, and next attempt succeeds because we only fail the first run
-        inputs = "my-test-project\n\n\n\nr\n"
+        inputs = "Y\nmy-test-project\n\n\n\nr\n"
         returncode, stdout, stderr = self.run_script(inputs, extra_env={"MOCK_BQ_DDL_FAIL": "1"})
         
         self.assertEqual(returncode, 0)
@@ -363,7 +363,7 @@ class TestDeploymentScript(unittest.TestCase):
             }
         ]
         
-        inputs = "my-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(
             inputs, 
             extra_env={"MOCK_BQ_LS_OUTPUT": json.dumps(existing_configs)}
@@ -389,7 +389,7 @@ class TestDeploymentScript(unittest.TestCase):
             }
         ]
         
-        inputs = "my-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(
             inputs, 
             extra_env={
@@ -422,7 +422,7 @@ class TestDeploymentScript(unittest.TestCase):
             }
         ]
         
-        inputs = "my-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        inputs = "Y\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
         returncode, stdout, stderr = self.run_script(
             inputs, 
             extra_env={"MOCK_BQ_LS_OUTPUT": json.dumps(existing_configs)}
@@ -440,6 +440,34 @@ class TestDeploymentScript(unittest.TestCase):
         deleted_configs = [c["args"][-1] for c in rm_calls]
         self.assertIn("projects/my-proj/locations/US/transferConfigs/cfg-111", deleted_configs)
         self.assertIn("projects/my-proj/locations/US/transferConfigs/cfg-222", deleted_configs)
+
+    def test_disclaimer_reject(self):
+        self.setup_standard_mocks()
+        inputs = "N\n"
+        returncode, stdout, stderr = self.run_script(inputs)
+        
+        self.assertEqual(returncode, 0)
+        self.assertIn("Exiting deployment.", stdout)
+        self.assertNotIn("Enter your Google Cloud Project ID:", stdout)
+
+    def test_disclaimer_invalid_then_accept(self):
+        self.setup_standard_mocks()
+        inputs = "invalid\nY\nmy-test-project\nUS\nGWS_Audit\nevery day 02:00\n"
+        returncode, stdout, stderr = self.run_script(inputs)
+        
+        self.assertEqual(returncode, 0)
+        self.assertIn("Invalid selection. Please enter 'Y' to acknowledge and proceed, or 'N' to exit.", stdout)
+        self.assertIn("Acknowledged. Proceeding...", stdout)
+        self.assertIn("✅ DEPLOYMENT COMPLETE", stdout)
+
+    def test_disclaimer_invalid_then_reject(self):
+        self.setup_standard_mocks()
+        inputs = "invalid\nN\n"
+        returncode, stdout, stderr = self.run_script(inputs)
+        
+        self.assertEqual(returncode, 0)
+        self.assertIn("Invalid selection. Please enter 'Y' to acknowledge and proceed, or 'N' to exit.", stdout)
+        self.assertIn("Exiting deployment.", stdout)
 
 if __name__ == '__main__':
     unittest.main()
