@@ -1,3 +1,5 @@
+# releasing/data-import-looker-dashboard/data-import-looker-dashboard
+
 # Quick Start Guide: Exchange Online Import Reporting Looker Dashboard
 
 The Exchange Online Import Reporting feature uses automated scripts to rapidly deploy a consolidated Looker Studio dashboard for your Google Workspace data import content.
@@ -12,6 +14,7 @@ Before beginning the deployment, ensure your environment meets the following pre
 *   **Cloud Shell or SDK:** Google Cloud Command Line Interface (`gcloud` CLI) and the BigQuery command-line tool configured to set up access to Google Cloud Shell or a local environment.
 *   **Required Permissions:** Administrative permissions to enable Google Application Programming Interfaces (APIs), create BigQuery BI Engine reservations, and manage BigQuery tables and scheduled queries.
 *   **Utility Tools:** `jq` must be installed for the automatic creation of scheduled queries.
+*  **Enable BQ Export:** You have to manually enable BQ export in the admin console. Follow the [Google Workspace Setup Guide](https://knowledge.workspace.google.com/admin/reports/set-up-service-log-exports-to-bigquery#before-begin) to get started.
 
 ---
 
@@ -49,6 +52,19 @@ Before beginning the deployment, ensure your environment meets the following pre
 3. Click **Edit and Share** to save a private copy to your personal account. *This ensures that the data freshness frequency is configured specifically in your personal version.*
 4. **Adjusting Frequency Settings:** If you need to modify update intervals later, navigate to:
    `Resource` > `Manage added data sources` > `Edit` > `Data freshness`.
+
+---
+
+## Updating the Deployment
+
+If updates or bug fixes are released for this project, you can easily apply them to your existing deployment:
+
+1. **Re-execute the Script:** Run the interactive deployment script again:
+   ```bash
+   ./script.sh
+   ```
+   Provide the same configuration inputs (Project ID, Dataset Name, etc.) when prompted. The script will automatically update the BigQuery schemas, tables, and scheduled queries to the latest version.
+2. **No Report Re-creation Needed:** You **do not** need to click on the Looker Studio Magic Link or create/save the report copy again. Your existing Looker Studio dashboard will automatically connect to the updated BigQuery tables and reflect the updates without any manual reconfiguration.
 
 ---
 
