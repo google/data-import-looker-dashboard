@@ -625,13 +625,13 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Verify fact_user_overall_metrics:
         # total_items_migrated = 1 (from wave A)
         # total_items = 2 (1 success + 1 failure)
-        # status should be 'In Progress' since wave-B is not marked complete
+        # status should be 'Running' since wave-B is not marked complete
         user_overall = self.conn.execute("SELECT total_items_migrated, total_items, status FROM fact_user_overall_metrics WHERE user_identifier='u-multi@example.com'").fetchall()
         self.assertEqual(len(user_overall), 1)
         succ, tot, status = user_overall[0]
         self.assertEqual(succ, 1)
         self.assertEqual(tot, 2)
-        self.assertEqual(status, "In Progress")
+        self.assertEqual(status, "Running")
 
     def test_empty_string_vs_null_normalization(self):
         """Test that empty string target_identifier resolves to Default Import Batch just like NULL."""
@@ -965,6 +965,71 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Verify the name remains 'Old Name' and was not updated to 'New Name'
         map_wave_rows = self.conn.execute("SELECT batch_name FROM map_wave_details WHERE batch_id='123'").fetchall()
         self.assertEqual(map_wave_rows, [('Old Name',)])
+
+    def test_user_failed_status_conditions(self):
+        """Test that user status is marked as Failed if total items migrated is zero and there is any failure (item or crawl)."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # 1. Setup execution and users:
+        # User 1 (failed item): total_items_migrated = 0, failed_items = 1, crawl_failure_items = 0 -> status 'Failed'
+        # User 2 (crawl failure): total_items_migrated = 0, failed_items = 0, crawl_failure_items = 1 -> status 'Failed'
+        # User 3 (no items/failures): total_items_migrated = 0, failed_items = 0, crawl_failure_items = 0 -> status 'Running'
+        # User 4 (completed but failed items): total_items_migrated = 0, failed_items = 1, is_completed = True -> status 'Failed'
+        self.conn.execute(f"""
+            INSERT INTO map_execution_wave VALUES 
+            ('Exchange Online Migration', 'Wave-Fail-Test', 'Fail Test Batch', 'Fail Test', 'exec-fail', TRUE);
+            
+            INSERT INTO snapshot_user_wave VALUES 
+            ('Exchange Online Migration', 'Wave-Fail-Test', 'u1@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
+            ('Exchange Online Migration', 'Wave-Fail-Test', 'u2@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
+            ('Exchange Online Migration', 'Wave-Fail-Test', 'u3@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
+            ('Exchange Online Migration', 'Wave-Fail-Test', 'u4@example.com', {now_usec}, TRUE, 'exec-fail', {now_usec});
+            
+            -- User 1 item failure event
+            INSERT INTO activity VALUES 
+            ({now_usec + 10}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Fail-Test', 'target_identifier': NULL, 'execution_id': 'exec-fail', 'source_name': 'u1@example.com', 'source_identifier': 'item-1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Err'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}');
+
+            -- User 2 crawl failure event
+            INSERT INTO activity VALUES 
+            ({now_usec + 20}, 'data_migration', 'CRAWL_FAILURE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Crawl Error'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Fail-Test', 'target_identifier': NULL, 'execution_id': 'exec-fail', 'source_name': 'u2@example.com', 'source_identifier': 'item-2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': 'CRAWL_ERR', 'migration_error_title': 'Crawl Err'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}');
+
+            -- User 4 item failure event
+            INSERT INTO activity VALUES 
+            ({now_usec + 30}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Fail-Test', 'target_identifier': NULL, 'execution_id': 'exec-fail', 'source_name': 'u4@example.com', 'source_identifier': 'item-4', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Err'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}');
+        """)
+
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Verify fact_user_wave_metrics
+        u1_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u1@example.com'").fetchone()[0]
+        u2_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u2@example.com'").fetchone()[0]
+        u3_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u3@example.com'").fetchone()[0]
+        u4_status = self.conn.execute("SELECT status FROM fact_user_wave_metrics WHERE user_identifier='u4@example.com'").fetchone()[0]
+
+        self.assertEqual(u1_status, "Failed")
+        self.assertEqual(u2_status, "Failed")
+        self.assertEqual(u3_status, "Running")
+        self.assertEqual(u4_status, "Failed")
+
+        # Verify fact_user_overall_metrics
+        u1_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u1@example.com'").fetchone()[0]
+        u2_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u2@example.com'").fetchone()[0]
+        u3_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u3@example.com'").fetchone()[0]
+        u4_overall = self.conn.execute("SELECT status FROM fact_user_overall_metrics WHERE user_identifier='u4@example.com'").fetchone()[0]
+
+        self.assertEqual(u1_overall, "Failed")
+        self.assertEqual(u2_overall, "Failed")
+        self.assertEqual(u3_overall, "Running")
+        self.assertEqual(u4_overall, "Failed")
 
 if __name__ == "__main__":
     unittest.main()

@@ -30,26 +30,39 @@ WHERE
   AND data_migration.migration_type = 'Exchange Online Migration'
   AND _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY);
 
--- Step 2: Session Mapping Generation
+-- Step 2: Latest Wave Names Extraction
+-- Extracts the latest user-friendly name for each wave from both configuration setups and updates in the current window.
+CREATE OR REPLACE TEMP TABLE latest_wave_names AS
+SELECT
+  REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)') AS wave_id,
+  IFNULL(NULLIF(data_migration.target_identifier, ''), 'Default Import Batch') AS batch_name,
+  time_usec
+FROM incremental_logs
+WHERE
+  REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)') IS NOT NULL
+  AND (
+    (
+      event_name = 'START_MIGRATION_SETUP'
+    )
+    OR (
+      event_name = 'UPDATE_MIGRATION_SETTINGS'
+      AND data_migration.target_identifier IS NOT NULL
+      AND data_migration.target_identifier != ''
+    )
+  )
+QUALIFY
+  ROW_NUMBER()
+    OVER (
+      PARTITION BY REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)')
+      ORDER BY time_usec DESC
+    )
+  = 1;
+
+-- Step 3: Session Mapping Generation
 -- Represents the mapping between raw migration execution IDs and their corresponding logical migration batches (waves).
 CREATE OR REPLACE TEMP TABLE current_wave_map
 AS
 WITH
-  SetupEvents AS (
-    SELECT
-      REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)') AS wave_id,
-      IFNULL(NULLIF(data_migration.target_identifier, ''), 'Default Import Batch') AS batch_name
-    FROM incremental_logs
-    WHERE
-      event_name = 'START_MIGRATION_SETUP'
-    QUALIFY
-      ROW_NUMBER()
-        OVER (
-          PARTITION BY REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)')
-          ORDER BY time_usec DESC
-        )
-      = 1
-  ),
   StartEvents AS (
     SELECT
       data_migration.migration_type AS data_type,
@@ -79,10 +92,10 @@ SELECT
   e.execution_id,
   e.is_latest_execution
 FROM StartEvents e
-LEFT JOIN SetupEvents s ON e.wave_id = s.wave_id
+LEFT JOIN latest_wave_names s ON e.wave_id = s.wave_id
 LEFT JOIN HistoricalDetails h ON e.wave_id = h.wave_id;
 
--- Step 3: Execute Sequenced MERGE Operations (Mapping Tables)
+-- Step 4: Execute Sequenced MERGE Operations (Mapping Tables)
 
 -- 1. Merge map_execution_wave
 -- Represents the persistent mapping table linking every distinct execution_id to its parent wave/batch and tracking the latest attempt.
@@ -121,6 +134,14 @@ WHERE is_latest_execution = TRUE
       AND s.execution_id != t.execution_id
   );
 
+-- Update all executions of a wave if the wave name has been updated/set in the lookback window
+UPDATE `{project}.{dataset}.map_execution_wave` t
+SET
+  t.batch_name = s.batch_name,
+  t.batch_filter = CONCAT(s.batch_name, " (ID: ", CAST(t.batch_id AS STRING), ")")
+FROM latest_wave_names s
+WHERE t.batch_id = s.wave_id;
+
 -- 2. Merge map_wave_details
 -- Represents the persistent registry of all unique migration batches, maintaining their latest friendly names and filter labels.
 MERGE `{project}.{dataset}.map_wave_details` t
@@ -143,20 +164,27 @@ SET
           VALUES(s.data_type, s.batch_id, s.batch_name, s.batch_filter);
 
 
--- Step 4: Active Entity Tracking for Incremental Filtering
+-- Step 5: Active Entity Tracking for Incremental Filtering
 -- Represents unique migration batches active in the current window, used to optimize downstream metric recalculations.
 CREATE OR REPLACE TEMP TABLE active_batches AS
 SELECT DISTINCT m.batch_id
 FROM incremental_logs a
 JOIN `{project}.{dataset}.map_execution_wave` m
-  ON a.data_migration.execution_id = m.execution_id;
+  ON a.data_migration.execution_id = m.execution_id
+UNION DISTINCT
+SELECT DISTINCT wave_id AS batch_id
+FROM latest_wave_names;
 
 -- Represents unique migration platforms (data types) active in the current window.
 CREATE OR REPLACE TEMP TABLE active_datatypes AS
 SELECT DISTINCT m.data_type
 FROM incremental_logs a
 JOIN `{project}.{dataset}.map_execution_wave` m
-  ON a.data_migration.execution_id = m.execution_id;
+  ON a.data_migration.execution_id = m.execution_id
+UNION DISTINCT
+SELECT DISTINCT t.data_type
+FROM latest_wave_names s
+JOIN `{project}.{dataset}.map_execution_wave` t ON s.wave_id = t.batch_id;
 
 -- Represents unique user-platform combinations active in the current window.
 CREATE OR REPLACE TEMP TABLE active_users_datatypes AS
@@ -167,7 +195,7 @@ JOIN `{project}.{dataset}.map_execution_wave` m
 WHERE a.data_migration.source_name IS NOT NULL;
 
 
--- Step 5: Update Persistent Snapshots
+-- Step 6: Update Persistent Snapshots
 
 -- 1. Item-Level Lifetime Status Generation (Incremental user-specific wave state)
 -- Represents the deduplicated list of individual migrated items from the current window, preserving only the single most definitive status per item.
@@ -296,6 +324,10 @@ USING (
   WHERE a.status.event_status = 'FAILED'
     AND a.data_migration.migration_error_code IS NOT NULL
     AND a.data_migration.migration_error_code != ''
+  QUALIFY ROW_NUMBER() OVER(
+    PARTITION BY m.batch_id, TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(a.data_migration.source_name, ""))))
+    ORDER BY a.time_usec DESC
+  ) = 1
 ) s
 ON t.batch_id = s.batch_id AND t.event_uuid = s.event_uuid
 WHEN MATCHED THEN UPDATE SET
@@ -306,7 +338,7 @@ VALUES(s.data_type, s.batch_id, s.batch_name, s.batch_filter, s.migration_error_
 
 
 
--- Step 6: Update Fact Tables
+-- Step 7: Update Fact Tables
 
 -- 1. Merge fact_datatype_metrics
 -- Represents top-level global scorecard metrics aggregated at the overall migration platform layer, tracking total user volumes and consolidated global health.
@@ -446,7 +478,7 @@ USING (
       0) AS success_percentage,
     IFNULL(SAFE_DIVIDE(u.completed_user_count, u.user_count), 0) AS completion_percentage,
     IFNULL(SAFE_DIVIDE(IFNULL(i.successfully_migrated_items, 0) + IFNULL(i.failed_items, 0), u.user_count), 0) AS avg_items_per_user,
-    IF(u.user_count = IFNULL(u.completed_user_count, 0) AND u.user_count > 0, 'Completed', 'In Progress') AS status
+    IF(u.user_count = IFNULL(u.completed_user_count, 0) AND u.user_count > 0, 'Completed', 'Running') AS status
   FROM WaveBase w
   LEFT JOIN WaveUserStats u ON w.batch_id = u.batch_id
   LEFT JOIN ItemAggs i ON w.batch_id = i.batch_id
@@ -569,9 +601,9 @@ USING (
         i.total_items_migrated + IFNULL(i.failed_items, 0)),
       0) AS success_rate_percentage,
     CASE
-      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND IFNULL(i.failed_items, 0) > 0 THEN 'Failed'
+      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
       WHEN b.is_completed THEN 'Completed'
-      ELSE 'In Progress'
+      ELSE 'Running'
     END AS status
   FROM UserBase b
   LEFT JOIN ItemCounts i ON b.batch_id = i.batch_id AND b.user_identifier = i.user_identifier
@@ -636,7 +668,7 @@ USING (
     SELECT
       u.data_type,
       u.user_identifier,
-      LOGICAL_OR(u.is_completed) AS is_completed,
+      LOGICAL_AND(u.is_completed) AS is_completed,
       ANY_VALUE(m.batch_filter) AS batch_filter
     FROM `{project}.{dataset}.snapshot_user_wave` u
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
@@ -680,7 +712,8 @@ USING (
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND source_type = 'Exchange Online Contact'
       ) AS migrated_contacts_count,
-      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items
+      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(event_name = 'CRAWL_FAILURE') AS crawl_failure_items
     FROM UserOverallItems
     GROUP BY data_type, user_identifier
   )
@@ -699,9 +732,9 @@ USING (
         i.total_items_migrated + IFNULL(i.failed_items, 0)),
       0) AS success_rate_percentage,
     CASE
-      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND IFNULL(i.failed_items, 0) > 0 THEN 'Failed'
+      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
       WHEN b.is_completed THEN 'Completed'
-      ELSE 'In Progress'
+      ELSE 'Running'
     END AS status
   FROM UserBase b
   LEFT JOIN ItemCounts i ON b.data_type = i.data_type AND b.user_identifier = i.user_identifier
