@@ -1,6 +1,26 @@
 # releasing/data-import-looker-dashboard/data-import-looker-dashboard
 
+## Terms & Disclaimer
+
+#### Modification Rights
+
+You are permitted to modify and run the deployment script (script.sh) and database configurations to accommodate custom directory structures, regional compliance regulations, or unique organizational metadata schemas. However, Google assumes no responsibility or liability for the outcomes of executing original or modified scripts, nor for any errors, discrepancies, or inaccuracies in the resulting data.
+
+#### Policy Ownership
+
+You must configure appropriate Identity and Access Management (IAM) permissions on your BigQuery datasets, Cloud Projects, and Looker Studio reports. Ensuring that sensitive Workspace audit logs are restricted to authorized administrators is your organization's sole responsibility.
+
+#### Exclusion of Damages
+
+In no event shall Google, the authors of the scripts, or any contributors be liable for any direct, indirect, incidental, special, exemplary, or consequential damages (including, but not limited to, procurement of substitute goods or services; loss of use, data, or profits; or business interruption) however caused and on any theory of liability, whether in contract, strict liability, or tort (including negligence or otherwise) arising in any way out of the use of this software, even if advised of the possibility of such damage.
+
+#### License & Additional Terms
+
+Use of this tool is governed by the Apache 2.0 license.
+
 # Quick Start Guide: Exchange Online Import Reporting Looker Dashboard
+
+For details on the metrics displayed in the dashboard reports, see the [Import Metrics Reference](METRICS.md).
 
 The Exchange Online Import Reporting feature uses automated scripts to rapidly deploy a consolidated Looker Studio dashboard for your Google Workspace data import content.
 
@@ -68,20 +88,3 @@ If updates or bug fixes are released for this project, you can easily apply them
 
 ---
 
-## Terms & Disclaimer
-
-#### Modification Rights
-
-You are permitted to modify and run the deployment script (script.sh) and database configurations to accommodate custom directory structures, regional compliance regulations, or unique organizational metadata schemas. However, Google assumes no responsibility or liability for the outcomes of executing original or modified scripts, nor for any errors, discrepancies, or inaccuracies in the resulting data.
-
-#### Policy Ownership
-
-You must configure appropriate Identity and Access Management (IAM) permissions on your BigQuery datasets, Cloud Projects, and Looker Studio reports. Ensuring that sensitive Workspace audit logs are restricted to authorized administrators is your organization's sole responsibility.
-
-#### Exclusion of Damages
-
-In no event shall Google, the authors of the scripts, or any contributors be liable for any direct, indirect, incidental, special, exemplary, or consequential damages (including, but not limited to, procurement of substitute goods or services; loss of use, data, or profits; or business interruption) however caused and on any theory of liability, whether in contract, strict liability, or tort (including negligence or otherwise) arising in any way out of the use of this software, even if advised of the possibility of such damage.
-
-#### License & Additional Terms
-
-Use of this tool is governed by the Apache 2.0 license.
