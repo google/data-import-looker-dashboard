@@ -774,94 +774,39 @@ SET
             s.success_rate_percentage,
             s.status);
 
--- 5. Merge fact_migration_errors
+-- 5. Update fact_migration_errors
 -- Represents the pre-aggregated blocker summary tracking specific error code frequencies per user and per batch.
-MERGE `{project}.{dataset}.fact_migration_errors` t
-USING (
-  WITH LatestWaveExecutions AS (
-    SELECT batch_id, execution_id
-    FROM `{project}.{dataset}.map_execution_wave`
-    WHERE is_latest_execution = TRUE
-  ),
-  LatestExecutionUsers AS (
-    SELECT DISTINCT m.batch_id, a.data_migration.source_name AS user_identifier
-    FROM incremental_logs a
-    JOIN LatestWaveExecutions m ON a.data_migration.execution_id = m.execution_id
-    WHERE a.data_migration.source_name IS NOT NULL
-  ),
-  UserErrorExecutionRanks AS (
-    SELECT 
-      batch_id, user_identifier, execution_id,
-      DENSE_RANK() OVER (PARTITION BY batch_id, user_identifier ORDER BY MAX(time_usec) DESC) AS rn
-    FROM `{project}.{dataset}.snapshot_migration_errors`
-    WHERE batch_id IN (SELECT batch_id FROM active_batches)
-    GROUP BY batch_id, user_identifier, execution_id
-  ),
-  FilteredSnapshotErrors AS (
-    SELECT s.*
-    FROM `{project}.{dataset}.snapshot_migration_errors` s
-    LEFT JOIN LatestExecutionUsers lu 
-      ON s.batch_id = lu.batch_id AND s.user_identifier = lu.user_identifier
-    LEFT JOIN LatestWaveExecutions le 
-      ON s.batch_id = le.batch_id
-    JOIN UserErrorExecutionRanks ur 
-      ON s.batch_id = ur.batch_id AND s.user_identifier = ur.user_identifier AND s.execution_id = ur.execution_id
-    WHERE s.batch_id IN (SELECT batch_id FROM active_batches)
-      AND (
-        (lu.user_identifier IS NOT NULL AND s.execution_id = le.execution_id)
-        OR
-        (lu.user_identifier IS NULL AND ur.rn = 1)
-      )
-  )
-  SELECT
-    data_type,
-    batch_id,
-    ANY_VALUE(batch_name) AS batch_name,
-    ANY_VALUE(batch_filter) AS batch_filter,
-    migration_error_code,
-    ANY_VALUE(migration_error_title) AS migration_error_title,
-    error_message,
-    user_identifier,
-    COUNT(*) AS occurrence_count
-  FROM FilteredSnapshotErrors
-  GROUP BY data_type, batch_id, migration_error_code, error_message, user_identifier
-) s
-ON
-  t.data_type = s.data_type
-  AND t.batch_id = s.batch_id
-  AND t.user_identifier = s.user_identifier
-  AND t.migration_error_code = s.migration_error_code
-  AND (t.error_message = s.error_message OR (t.error_message IS NULL AND s.error_message IS NULL))
-WHEN MATCHED
-THEN UPDATE
-SET
-  t.batch_name = s.batch_name,
-  t.batch_filter = s.batch_filter,
-  t.migration_error_title = s.migration_error_title,
-  t.error_message = s.error_message,
-  t.occurrence_count = s.occurrence_count
-    WHEN NOT MATCHED
-      THEN
-        INSERT(
-          data_type,
-          batch_id,
-          batch_name,
-          batch_filter,
-          migration_error_code,
-          migration_error_title,
-          error_message,
-          user_identifier,
-          occurrence_count)
-          VALUES(
-            s.data_type,
-            s.batch_id,
-            s.batch_name,
-            s.batch_filter,
-            s.migration_error_code,
-            s.migration_error_title,
-            s.error_message,
-            s.user_identifier,
-            s.occurrence_count);
+DELETE FROM `{project}.{dataset}.fact_migration_errors`
+WHERE batch_id IN (SELECT batch_id FROM active_batches);
+
+INSERT INTO `{project}.{dataset}.fact_migration_errors` (
+  data_type,
+  batch_id,
+  batch_name,
+  batch_filter,
+  migration_error_code,
+  migration_error_title,
+  error_message,
+  user_identifier,
+  occurrence_count
+)
+SELECT
+  s.data_type,
+  s.batch_id,
+  ANY_VALUE(s.batch_name) AS batch_name,
+  ANY_VALUE(s.batch_filter) AS batch_filter,
+  s.migration_error_code,
+  ANY_VALUE(s.migration_error_title) AS migration_error_title,
+  s.error_message,
+  s.user_identifier,
+  COUNT(*) AS occurrence_count
+FROM `{project}.{dataset}.snapshot_migration_errors` s
+JOIN `{project}.{dataset}.map_execution_wave` m
+  ON s.batch_id = m.batch_id 
+  AND s.execution_id = m.execution_id
+WHERE s.batch_id IN (SELECT batch_id FROM active_batches)
+  AND m.is_latest_execution = TRUE
+GROUP BY s.data_type, s.batch_id, s.migration_error_code, s.error_message, s.user_identifier;
 
 -- 6. Merge fact_migration_timeline
 -- Represents the daily throughput velocity mapping distinct successful items migrated per day over a rolling 1-year window.
@@ -927,3 +872,36 @@ SET
             s.batch_filter,
             s.migration_date,
             s.items_migrated);
+
+
+-- 7. Update fact_top_errors
+-- Represents the top 10 unique migration error reasons (based on title) for the latest executions across all batches.
+DELETE FROM `{project}.{dataset}.fact_top_errors` WHERE TRUE;
+
+INSERT INTO `{project}.{dataset}.fact_top_errors` (
+  migration_error_title,
+  error_message,
+  user_identifier,
+  occurrence_count
+)
+WITH RankedUniqueErrors AS (
+  SELECT
+    migration_error_title,
+    error_message,
+    user_identifier,
+    SUM(occurrence_count) OVER (PARTITION BY migration_error_title) AS total_occurrence_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY migration_error_title 
+      ORDER BY occurrence_count DESC
+    ) AS rn
+  FROM `{project}.{dataset}.fact_migration_errors`
+)
+SELECT
+  migration_error_title,
+  error_message,
+  user_identifier,
+  total_occurrence_count AS occurrence_count
+FROM RankedUniqueErrors
+WHERE rn = 1
+ORDER BY occurrence_count DESC
+LIMIT 10;

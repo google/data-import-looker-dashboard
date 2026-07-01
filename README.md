@@ -89,6 +89,6 @@ Before beginning the deployment, ensure your environment meets the following pre
 
 If updates or bug fixes are released, you can apply them to your existing deployment by following these steps:
 
-1. Re-run the interactive deployment script (`./script.sh`) in Cloud Shell.
+1. Fetch the updated code.Re-run the interactive deployment script (`./script.sh`) in Cloud Shell.
 2. Provide the same configuration inputs (Project ID, Dataset Name, etc.) when prompted. 
 3. The script will automatically update your BigQuery schemas, tables, and scheduled queries.

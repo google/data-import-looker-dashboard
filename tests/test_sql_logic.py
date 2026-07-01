@@ -766,8 +766,8 @@ class TestSQLLogicLocal(unittest.TestCase):
         snap_rows = self.conn.execute("SELECT is_completed, latest_execution_id FROM snapshot_user_wave WHERE user_identifier='u1@example.com'").fetchall()
         self.assertEqual(snap_rows, [(False, "exec-2")])
 
-    def test_blocker_error_preservation(self):
-        """Test that historical blocker errors are preserved in fact_migration_errors for audit/history when a retry succeeds."""
+    def test_blocker_error_removal_on_success(self):
+        """Test that historical blocker errors are removed from fact_migration_errors when a retry succeeds."""
         self.run_sql_file(self.ddl_path)
 
         now_ts = datetime.utcnow()
@@ -814,10 +814,9 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Execute DML pipeline
         self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
 
-        # 3. Verify that the blocker error remains in fact_migration_errors for audit history
+        # 3. Verify that the blocker error is removed from fact_migration_errors on success
         err_rows = self.conn.execute("SELECT occurrence_count FROM fact_migration_errors WHERE user_identifier='u@example.com'").fetchall()
-        self.assertEqual(len(err_rows), 1, "Historical blocker error was unexpectedly deleted!")
-        self.assertEqual(err_rows[0][0], 1)
+        self.assertEqual(len(err_rows), 0, "Historical blocker error was not deleted on success!")
 
     def test_wave_name_update(self):
         """Test that wave name updates from 'UPDATE_MIGRATION_SETTINGS' are processed and propagated to metrics."""
@@ -1030,6 +1029,130 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(u2_overall, "Failed")
         self.assertEqual(u3_overall, "Running")
         self.assertEqual(u4_overall, "Failed")
+
+    def test_top_errors_aggregation(self):
+        """Test that fact_top_errors properly aggregates, unique-ifies, and ranks errors."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # Setup mapping
+        self.conn.execute(f"""
+            INSERT INTO map_execution_wave VALUES 
+            ('Exchange Online Migration', 'Wave-1', 'Wave 1', 'Wave 1 Filter', 'exec-1', TRUE);
+        """)
+
+        # Insert events in activity
+        # Title A: 3 occurrences (u1)
+        # Title B: 1 occurrence (u2)
+        # Title C: 5 occurrences (u3)
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            ({now_usec - 100}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 90}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 80}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i3', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            ({now_usec - 70}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error B'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u2@example.com', 'source_identifier': 'i4', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Internal Error'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            ({now_usec - 60}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i5', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 50}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i6', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 40}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i7', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 30}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i8', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 20}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i9', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 15}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u4@example.com', 'source_identifier': 'i10', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 10}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u4@example.com', 'source_identifier': 'i11', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # Run DML
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Verify fact_top_errors has unique title rows ordered by count desc:
+        # 1. Forbidden (5), u3@example.com
+        # 2. Unauthorized (5), u1@example.com (sum is 5, u1 has higher count 3 than u4's 2)
+        # 3. Internal Error (1), u2@example.com
+        rows = self.conn.execute("SELECT migration_error_title, occurrence_count, user_identifier FROM fact_top_errors ORDER BY occurrence_count DESC, migration_error_title").fetchall()
+        self.assertEqual(rows, [
+            ('Forbidden', 5, 'u3@example.com'),
+            ('Unauthorized', 5, 'u1@example.com'),
+            ('Internal Error', 1, 'u2@example.com')
+        ])
+
+    def test_latest_execution_per_batch_errors(self):
+        """Test that fact_migration_errors only contains errors from the absolute latest execution of the batch."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # 1. Setup execution exec-1 (initial run with failures for u1 and u2)
+        self.conn.execute(f"""
+            INSERT INTO map_execution_wave VALUES 
+            ('Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-1', TRUE);
+        """)
+
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            ({now_usec - 1000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-A', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 900}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Forbidden'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-A', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u2@example.com', 'source_identifier': 'i2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # Run DML for first execution
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Verify both u1 and u2 errors are in the fact table
+        err_rows = self.conn.execute("SELECT user_identifier, migration_error_code FROM fact_migration_errors ORDER BY user_identifier").fetchall()
+        self.assertEqual(err_rows, [('u1@example.com', '401'), ('u2@example.com', '403')])
+
+        # Clean/truncate activity
+        self.conn.execute("DELETE FROM activity;")
+
+        # 2. Simulate exec-2 starting (u1 retried and failed with a new error; u2 not retried)
+        self.conn.execute(f"""
+            UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
+            
+            INSERT INTO map_execution_wave VALUES 
+            ('Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-2', TRUE);
+
+            -- u1 fails with 500 error in exec-2
+            INSERT INTO activity VALUES 
+            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Internal Error'}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-A', 'target_identifier': NULL, 'execution_id': 'exec-2', 'source_name': 'u1@example.com', 'source_identifier': 'i3', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Internal'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # Run DML for second execution
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Verify that ONLY u1's new error from exec-2 exists in the table. u2's old error is gone.
+        err_rows = self.conn.execute("SELECT user_identifier, migration_error_code FROM fact_migration_errors").fetchall()
+        self.assertEqual(err_rows, [('u1@example.com', '500')])
 
 if __name__ == "__main__":
     unittest.main()

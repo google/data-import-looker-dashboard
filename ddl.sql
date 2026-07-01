@@ -1,4 +1,4 @@
--- # Copyright 2026 Google LLC
+ -- # Copyright 2026 Google LLC
 -- #
 -- # Licensed under the Apache License, Version 2.0 (the "License");
 -- # you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ DROP TABLE IF EXISTS `{project}.{dataset}.fact_user_wave_metrics`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_user_overall_metrics`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_migration_errors`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_migration_timeline`;
+DROP TABLE IF EXISTS `{project}.{dataset}.fact_top_errors`;
 DROP TABLE IF EXISTS `{project}.{dataset}.snapshot_item_user_wave`;
 DROP TABLE IF EXISTS `{project}.{dataset}.snapshot_user_wave`;
 DROP TABLE IF EXISTS `{project}.{dataset}.snapshot_migration_errors`;
@@ -112,6 +113,14 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_migration_errors`(
   user_identifier STRING,
   occurrence_count INT64)
   CLUSTER BY data_type, batch_id;
+
+-- fact_top_errors
+CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_top_errors`(
+  migration_error_title STRING,
+  error_message STRING,
+  user_identifier STRING,
+  occurrence_count INT64)
+  CLUSTER BY migration_error_title;
 
 -- fact_migration_timeline
 CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_migration_timeline`(
