@@ -5,7 +5,7 @@
 ## Terms & Disclaimer
 
 ### Modification Rights
-You are permitted to modify and run the deployment script (`script.sh`) and database configurations to accommodate custom directory structures, regional compliance regulations, or unique organizational metadata schemas. However, Google assumes no responsibility or liability for the outcomes of executing original or modified scripts, nor for any errors, discrepancies, or inaccuracies in the resulting data.
+While not necessary, you are permitted to modify and run the deployment script (`script.sh`) and database configurations to accommodate custom directory structures, regional compliance regulations, or unique organizational metadata schemas. However, Google assumes no responsibility or liability for the outcomes of executing original or modified scripts, nor for any errors, discrepancies, or inaccuracies in the resulting data.
 
 ### Policy Ownership
 You must configure appropriate Identity and Access Management (IAM) permissions on your BigQuery datasets, Cloud Projects, and Looker Studio reports. Ensuring that sensitive Workspace audit logs are restricted to authorized administrators is your organization's sole responsibility.
