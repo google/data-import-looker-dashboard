@@ -154,7 +154,44 @@ echo "$DML_BACKFILL_QUERY" | bq query --location="$BQ_LOCATION" --use_legacy_sql
 echo ""
 
 # ----------------------------------------------------------
-# 5. Create the Scheduled Query
+# 5. Service Account Setup (Bypasses CLI OAuth Prompts)
+# ----------------------------------------------------------
+SA_NAME="dashboard-refresher-sa"
+SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+echo "👤 Setting up Service Account for background execution..."
+
+# Check if Service Account already exists, create if not
+if ! gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" &>/dev/null; then
+    echo "Creating service account '$SA_NAME'..."
+    if ! gcloud iam service-accounts create "$SA_NAME" \
+        --description="Service account to refresh the Data Import dashboard" \
+        --display-name="Dashboard Refresher Service Account" \
+        --project "$PROJECT_ID"; then
+        handle_failure "Failed to create Service Account. Please verify your permissions." && continue
+    fi
+else
+    echo "Service account '$SA_NAME' already exists."
+fi
+
+# Assign necessary roles to the Service Account
+echo "Assigning BigQuery permissions to the Service Account..."
+if ! gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/bigquery.dataEditor" \
+    --condition=None &>/dev/null; then
+    echo "⚠️ Warning: Failed to assign roles/bigquery.dataEditor to the Service Account."
+fi
+
+if ! gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$SA_EMAIL" \
+    --role="roles/bigquery.jobUser" \
+    --condition=None &>/dev/null; then
+    echo "⚠️ Warning: Failed to assign roles/bigquery.jobUser to the Service Account."
+fi
+
+# ----------------------------------------------------------
+# 6. Create the Scheduled Query
 # ----------------------------------------------------------
 echo "⏱️ Setting up the Automated Schedule ($SCHEDULE)..."
 
@@ -200,6 +237,7 @@ else
       --data_source="scheduled_query" \
       --schedule="$SCHEDULE" \
       --params="$PARAMS" \
+      --service_account_name="$SA_EMAIL" \
       --force; then
         echo "✅ Schedule created successfully!"
     else
