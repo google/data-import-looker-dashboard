@@ -27,7 +27,7 @@ FROM
   `{project}.{dataset}.activity`
 WHERE
   record_type = 'data_migration'
-  AND data_migration.migration_type = 'Exchange Online Migration'
+  AND data_migration.migration_type IN ('Exchange Online Migration', 'SharePoint Online Enterprise Migration')
   AND _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY);
 
 -- Step 2: Latest Wave Names Extraction
@@ -218,7 +218,7 @@ WITH BaseItems AS (
   WHERE LOWER(a.event_type) = 'migration'
     AND a.data_migration.source_name IS NOT NULL
     AND (
-      a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+      a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       OR a.status.event_status = 'FAILED'
     )
 ),
@@ -372,7 +372,7 @@ USING (
       data_type,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS successfully_migrated_items,
       COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items
     FROM OverallItems
@@ -437,7 +437,7 @@ USING (
       i.batch_id,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS successfully_migrated_items,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
@@ -451,6 +451,22 @@ USING (
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND i.source_type = 'Exchange Online Contact'
       ) AS migrated_contacts_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type = 'Sharepoint File'
+      ) AS migrated_files_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type = 'Sharepoint File Version'
+      ) AS migrated_file_versions_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type IN ('Folder', 'Sharepoint Folder')
+      ) AS migrated_folders_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type = 'Sharepoint Item Crawler'
+      ) AS migrated_item_crawlers_count,
       COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
       COUNTIF(i.event_name = 'CRAWL_FAILURE' AND (i.execution_id = u.latest_execution_id OR u.latest_execution_id IS NULL)) AS crawl_failure_items
     FROM `{project}.{dataset}.snapshot_item_user_wave` i
@@ -471,6 +487,10 @@ USING (
     IFNULL(i.migrated_mails_count, 0) AS migrated_mails_count,
     IFNULL(i.migrated_calendars_count, 0) AS migrated_calendars_count,
     IFNULL(i.migrated_contacts_count, 0) AS migrated_contacts_count,
+    IFNULL(i.migrated_files_count, 0) AS migrated_files_count,
+    IFNULL(i.migrated_file_versions_count, 0) AS migrated_file_versions_count,
+    IFNULL(i.migrated_folders_count, 0) AS migrated_folders_count,
+    IFNULL(i.migrated_item_crawlers_count, 0) AS migrated_item_crawlers_count,
     IFNULL(
       SAFE_DIVIDE(
         i.successfully_migrated_items,
@@ -495,6 +515,10 @@ SET
   t.migrated_mails_count = s.migrated_mails_count,
   t.migrated_calendars_count = s.migrated_calendars_count,
   t.migrated_contacts_count = s.migrated_contacts_count,
+  t.migrated_files_count = s.migrated_files_count,
+  t.migrated_file_versions_count = s.migrated_file_versions_count,
+  t.migrated_folders_count = s.migrated_folders_count,
+  t.migrated_item_crawlers_count = s.migrated_item_crawlers_count,
   t.success_percentage = s.success_percentage,
   t.completion_percentage = s.completion_percentage,
   t.avg_items_per_user = s.avg_items_per_user,
@@ -514,6 +538,10 @@ SET
           migrated_mails_count,
           migrated_calendars_count,
           migrated_contacts_count,
+          migrated_files_count,
+          migrated_file_versions_count,
+          migrated_folders_count,
+          migrated_item_crawlers_count,
           success_percentage,
           completion_percentage,
           avg_items_per_user,
@@ -531,6 +559,10 @@ SET
             s.migrated_mails_count,
             s.migrated_calendars_count,
             s.migrated_contacts_count,
+            s.migrated_files_count,
+            s.migrated_file_versions_count,
+            s.migrated_folders_count,
+            s.migrated_item_crawlers_count,
             s.success_percentage,
             s.completion_percentage,
             s.avg_items_per_user,
@@ -560,7 +592,7 @@ USING (
       i.user_identifier,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS total_items_migrated,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
@@ -574,6 +606,22 @@ USING (
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND i.source_type = 'Exchange Online Contact'
       ) AS migrated_contacts_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type = 'Sharepoint File'
+      ) AS migrated_files_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type = 'Sharepoint File Version'
+      ) AS migrated_file_versions_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type IN ('Folder', 'Sharepoint Folder')
+      ) AS migrated_folders_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.source_type = 'Sharepoint Item Crawler'
+      ) AS migrated_item_crawlers_count,
       COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
       COUNTIF(i.event_name = 'CRAWL_FAILURE' AND (i.execution_id = u.latest_execution_id OR u.latest_execution_id IS NULL)) AS crawl_failure_items
     FROM `{project}.{dataset}.snapshot_item_user_wave` i
@@ -592,6 +640,10 @@ USING (
     IFNULL(i.migrated_mails_count, 0) AS migrated_mails_count,
     IFNULL(i.migrated_calendars_count, 0) AS migrated_calendars_count,
     IFNULL(i.migrated_contacts_count, 0) AS migrated_contacts_count,
+    IFNULL(i.migrated_files_count, 0) AS migrated_files_count,
+    IFNULL(i.migrated_file_versions_count, 0) AS migrated_file_versions_count,
+    IFNULL(i.migrated_folders_count, 0) AS migrated_folders_count,
+    IFNULL(i.migrated_item_crawlers_count, 0) AS migrated_item_crawlers_count,
     IFNULL(i.failed_items, 0) AS failed_items,
     IFNULL(i.crawl_failure_items, 0) AS crawl_failure_items,
     IFNULL(i.total_items_migrated, 0) + IFNULL(i.failed_items, 0) AS total_items,
@@ -622,6 +674,10 @@ SET
   t.migrated_mails_count = s.migrated_mails_count,
   t.migrated_calendars_count = s.migrated_calendars_count,
   t.migrated_contacts_count = s.migrated_contacts_count,
+  t.migrated_files_count = s.migrated_files_count,
+  t.migrated_file_versions_count = s.migrated_file_versions_count,
+  t.migrated_folders_count = s.migrated_folders_count,
+  t.migrated_item_crawlers_count = s.migrated_item_crawlers_count,
   t.failed_items = s.failed_items,
   t.crawl_failure_items = s.crawl_failure_items,
   t.total_items = s.total_items,
@@ -639,6 +695,10 @@ SET
           migrated_mails_count,
           migrated_calendars_count,
           migrated_contacts_count,
+          migrated_files_count,
+          migrated_file_versions_count,
+          migrated_folders_count,
+          migrated_item_crawlers_count,
           failed_items,
           crawl_failure_items,
           total_items,
@@ -654,6 +714,10 @@ SET
             s.migrated_mails_count,
             s.migrated_calendars_count,
             s.migrated_contacts_count,
+            s.migrated_files_count,
+            s.migrated_file_versions_count,
+            s.migrated_folders_count,
+            s.migrated_item_crawlers_count,
             s.failed_items,
             s.crawl_failure_items,
             s.total_items,
@@ -698,7 +762,7 @@ USING (
       user_identifier,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS total_items_migrated,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
@@ -712,6 +776,22 @@ USING (
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND source_type = 'Exchange Online Contact'
       ) AS migrated_contacts_count,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND source_type = 'Sharepoint File'
+      ) AS migrated_files_count,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND source_type = 'Sharepoint File Version'
+      ) AS migrated_file_versions_count,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND source_type IN ('Folder', 'Sharepoint Folder')
+      ) AS migrated_folders_count,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND source_type = 'Sharepoint Item Crawler'
+      ) AS migrated_item_crawlers_count,
       COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
       COUNTIF(event_name = 'CRAWL_FAILURE') AS crawl_failure_items
     FROM UserOverallItems
@@ -725,6 +805,10 @@ USING (
     IFNULL(i.migrated_mails_count, 0) AS migrated_mails_count,
     IFNULL(i.migrated_calendars_count, 0) AS migrated_calendars_count,
     IFNULL(i.migrated_contacts_count, 0) AS migrated_contacts_count,
+    IFNULL(i.migrated_files_count, 0) AS migrated_files_count,
+    IFNULL(i.migrated_file_versions_count, 0) AS migrated_file_versions_count,
+    IFNULL(i.migrated_folders_count, 0) AS migrated_folders_count,
+    IFNULL(i.migrated_item_crawlers_count, 0) AS migrated_item_crawlers_count,
     IFNULL(i.total_items_migrated, 0) + IFNULL(i.failed_items, 0) AS total_items,
     IFNULL(
       SAFE_DIVIDE(
@@ -746,6 +830,10 @@ SET
   t.migrated_mails_count = s.migrated_mails_count,
   t.migrated_calendars_count = s.migrated_calendars_count,
   t.migrated_contacts_count = s.migrated_contacts_count,
+  t.migrated_files_count = s.migrated_files_count,
+  t.migrated_file_versions_count = s.migrated_file_versions_count,
+  t.migrated_folders_count = s.migrated_folders_count,
+  t.migrated_item_crawlers_count = s.migrated_item_crawlers_count,
   t.total_items = s.total_items,
   t.success_rate_percentage = s.success_rate_percentage,
   t.status = s.status
@@ -759,6 +847,10 @@ SET
           migrated_mails_count,
           migrated_calendars_count,
           migrated_contacts_count,
+          migrated_files_count,
+          migrated_file_versions_count,
+          migrated_folders_count,
+          migrated_item_crawlers_count,
           total_items,
           success_rate_percentage,
           status)
@@ -770,6 +862,10 @@ SET
             s.migrated_mails_count,
             s.migrated_calendars_count,
             s.migrated_contacts_count,
+            s.migrated_files_count,
+            s.migrated_file_versions_count,
+            s.migrated_folders_count,
+            s.migrated_item_crawlers_count,
             s.total_items,
             s.success_rate_percentage,
             s.status);
@@ -831,7 +927,7 @@ USING (
     WHERE
       LOWER(a.event_type) = 'migration'
       AND LOWER(a.status.event_status) IN ('succeeded', 'succeeded_with_warnings')
-      AND a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+      AND a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       AND DATE(TIMESTAMP_MICROS(a.time_usec)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)
   )
   SELECT

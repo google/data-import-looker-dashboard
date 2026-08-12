@@ -156,7 +156,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(len(wave_metrics), 1)
         
         # Unpack result row (matches fact_wave_metrics schema)
-        data_type, batch_id, batch_name, filter_lbl, start_date, user_cnt, comp_user, succ_items, tot_items, email_cnt, cal_cnt, con_cnt, succ_pct, comp_pct, avg_items, status = wave_metrics[0]
+        data_type, batch_id, batch_name, filter_lbl, start_date, user_cnt, comp_user, succ_items, tot_items, email_cnt, cal_cnt, con_cnt, file_cnt, file_ver_cnt, fld_cnt, crawl_cnt, succ_pct, comp_pct, avg_items, status = wave_metrics[0]
         
         self.assertEqual(user_cnt, 1)
         self.assertEqual(comp_user, 1)
@@ -165,6 +165,10 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(email_cnt, 1)
         self.assertEqual(cal_cnt, 1)
         self.assertEqual(con_cnt, 1)
+        self.assertEqual(file_cnt, 0)
+        self.assertEqual(file_ver_cnt, 0)
+        self.assertEqual(fld_cnt, 0)
+        self.assertEqual(crawl_cnt, 0)
         self.assertEqual(succ_pct, 0.75) # 3 / 4
         self.assertEqual(comp_pct, 1.0) # 1 / 1 user completed
         self.assertEqual(status, "Completed")
@@ -173,7 +177,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         user_metrics = self.conn.execute("SELECT * FROM fact_user_wave_metrics").fetchall()
         self.assertEqual(len(user_metrics), 1)
         self.assertEqual(user_metrics[0][4], "user1@example.com") # user_identifier
-        self.assertEqual(user_metrics[0][13], "Completed") # status
+        self.assertEqual(user_metrics[0][17], "Completed") # status
 
     def test_incremental_lookback_filtering(self):
         """Test that event logs outside of the lookback window are correctly excluded."""
