@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*/__pycache__/
+__pycache__/
+*/*/__pycache__/
+*/*/test_*
+.env
+env/
+outputs/
+data/
+test_*.py
+.DS_Store
+*.code-workspace
