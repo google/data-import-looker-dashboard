@@ -188,11 +188,11 @@ JOIN `{project}.{dataset}.map_execution_wave` t ON s.wave_id = t.batch_id;
 
 -- Represents unique user-platform combinations active in the current window.
 CREATE OR REPLACE TEMP TABLE active_users_datatypes AS
-SELECT DISTINCT m.data_type, a.data_migration.source_name AS user_identifier
+SELECT DISTINCT m.data_type, COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User') AS user_identifier
 FROM incremental_logs a
 JOIN `{project}.{dataset}.map_execution_wave` m
   ON a.data_migration.execution_id = m.execution_id
-WHERE a.data_migration.source_name IS NOT NULL;
+WHERE TRUE;
 
 
 -- Step 6: Update Persistent Snapshots
@@ -204,7 +204,7 @@ WITH BaseItems AS (
   SELECT
     m.data_type,
     m.batch_id,
-    a.data_migration.source_name AS user_identifier,
+    COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User') AS user_identifier,
     a.data_migration.source_identifier,
     a.event_name,
     a.data_migration.source_type AS source_type,
@@ -216,9 +216,9 @@ WITH BaseItems AS (
   JOIN `{project}.{dataset}.map_execution_wave` m
     ON a.data_migration.execution_id = m.execution_id
   WHERE LOWER(a.event_type) = 'migration'
-    AND a.data_migration.source_name IS NOT NULL
+    AND COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)')) IS NOT NULL
     AND (
-      a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
+      a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       OR a.status.event_status = 'FAILED'
     )
 ),
@@ -265,22 +265,34 @@ MERGE `{project}.{dataset}.snapshot_user_wave` t
 USING (
   WITH UserBaseStats AS (
     SELECT 
-      m.data_type, m.batch_id, a.data_migration.source_name AS user_identifier,
+      m.data_type, m.batch_id, COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User') AS user_identifier,
       MIN(a.time_usec) AS start_time_usec,
       ARRAY_AGG(a.data_migration.execution_id ORDER BY a.time_usec DESC)[OFFSET(0)] AS latest_execution_id,
       MAX(a.time_usec) AS latest_execution_time_usec
     FROM incremental_logs a
     JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
-    WHERE a.data_migration.source_name IS NOT NULL
+    WHERE COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)')) IS NOT NULL
     GROUP BY m.data_type, m.batch_id, user_identifier
   ),
-  UserExecCompletions AS (
-    SELECT DISTINCT
-      m.batch_id, a.data_migration.source_name AS user_identifier, a.data_migration.execution_id,
-      TRUE AS is_completed
+  BatchStops AS (
+    SELECT DISTINCT m.batch_id
     FROM incremental_logs a
     JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
-    WHERE a.event_name = 'USER_MIGRATION_COMPLETE' AND a.data_migration.source_name IS NOT NULL
+    WHERE a.event_name = 'STOP_MIGRATION'
+  ),
+  UserExecCompletions AS (
+    SELECT
+      m.batch_id, COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User') AS user_identifier, a.data_migration.execution_id,
+      IF(
+        MAX(m.data_type) = 'SharePoint Online Enterprise Migration',
+        TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), TIMESTAMP_MICROS(MAX(a.time_usec)), HOUR) >= 2,
+        LOGICAL_OR(a.event_name = 'USER_MIGRATION_COMPLETE') OR MAX(IF(bs.batch_id IS NOT NULL, TRUE, FALSE))
+      ) AS is_completed
+    FROM incremental_logs a
+    JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
+    LEFT JOIN BatchStops bs ON m.batch_id = bs.batch_id
+    WHERE COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)')) IS NOT NULL
+    GROUP BY m.batch_id, user_identifier, a.data_migration.execution_id
   )
   SELECT 
     b.data_type, b.batch_id, b.user_identifier,
@@ -314,10 +326,10 @@ USING (
     a.data_migration.migration_error_code,
     a.data_migration.migration_error_title,
     a.status.error_message,
-    a.data_migration.source_name AS user_identifier,
+    COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User') AS user_identifier,
     a.data_migration.execution_id,
     a.time_usec,
-    TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(a.data_migration.source_name, "")))) AS event_uuid
+    TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User'), "")))) AS event_uuid
   FROM incremental_logs a
   JOIN `{project}.{dataset}.map_execution_wave` m
     ON a.data_migration.execution_id = m.execution_id
@@ -325,7 +337,7 @@ USING (
     AND a.data_migration.migration_error_code IS NOT NULL
     AND a.data_migration.migration_error_code != ''
   QUALIFY ROW_NUMBER() OVER(
-    PARTITION BY m.batch_id, TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(a.data_migration.source_name, ""))))
+    PARTITION BY m.batch_id, TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(COALESCE(NULLIF(a.data_migration.source_name, ''), REGEXP_EXTRACT(a.data_migration.source_uri, r'(?:/personal/|/sites/)([^/]+)'), 'Unknown User'), ""))))
     ORDER BY a.time_usec DESC
   ) = 1
 ) s
@@ -372,7 +384,7 @@ USING (
       data_type,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
+        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS successfully_migrated_items,
       COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items
     FROM OverallItems
@@ -437,7 +449,7 @@ USING (
       i.batch_id,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
+        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS successfully_migrated_items,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
@@ -592,7 +604,7 @@ USING (
       i.user_identifier,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
+        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS total_items_migrated,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
@@ -762,7 +774,7 @@ USING (
       user_identifier,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
+        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       ) AS total_items_migrated,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
@@ -927,7 +939,7 @@ USING (
     WHERE
       LOWER(a.event_type) = 'migration'
       AND LOWER(a.status.event_status) IN ('succeeded', 'succeeded_with_warnings')
-      AND a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File Version', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
+      AND a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact', 'Sharepoint File', 'Folder', 'Sharepoint Folder', 'Sharepoint Item Crawler')
       AND DATE(TIMESTAMP_MICROS(a.time_usec)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)
   )
   SELECT
