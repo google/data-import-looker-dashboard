@@ -361,7 +361,7 @@ USING (
     FROM `{project}.{dataset}.snapshot_item_user_wave`
     WHERE data_type IN (SELECT data_type FROM active_datatypes)
     QUALIFY ROW_NUMBER() OVER (
-      PARTITION BY data_type, source_identifier 
+      PARTITION BY data_type, user_identifier, source_identifier 
       ORDER BY 
         CASE WHEN LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings') THEN 1 ELSE 2 END ASC,
         time_usec DESC
@@ -372,7 +372,7 @@ USING (
       data_type,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND event_name IN ('CREATE_FILE', 'CREATE_FOLDER', 'CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
       ) AS successfully_migrated_items,
       COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items
     FROM OverallItems
@@ -415,13 +415,15 @@ MERGE `{project}.{dataset}.fact_wave_metrics` t
 USING (
   WITH WaveUserStats AS (
     SELECT
+      data_type,
       batch_id,
       MIN(TIMESTAMP_MICROS(start_time_usec)) AS start_date,
       COUNT(DISTINCT user_identifier) AS user_count,
       COUNTIF(is_completed) AS completed_user_count
     FROM `{project}.{dataset}.snapshot_user_wave`
     WHERE batch_id IN (SELECT batch_id FROM active_batches)
-    GROUP BY batch_id
+      AND data_type = 'Exchange Online Migration'
+    GROUP BY data_type, batch_id
   ),
   WaveBase AS (
     SELECT DISTINCT
@@ -431,32 +433,43 @@ USING (
       batch_filter
     FROM `{project}.{dataset}.map_execution_wave`
     WHERE batch_id IN (SELECT batch_id FROM active_batches)
+      AND data_type = 'Exchange Online Migration'
   ),
   ItemAggs AS (
     SELECT
+      i.data_type,
       i.batch_id,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND i.event_name IN ('CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
       ) AS successfully_migrated_items,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type = 'Exchange Online Email Message'
+        AND i.event_name = 'CREATE_GMAIL_MESSAGE'
       ) AS migrated_mails_count,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type = 'Exchange Online Calendar Event'
+        AND i.event_name = 'CREATE_CALENDAR_EVENT'
       ) AS migrated_calendars_count,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type = 'Exchange Online Contact'
+        AND i.event_name = 'CREATE_CONTACT'
       ) AS migrated_contacts_count,
       COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
-      COUNTIF(i.event_name = 'CRAWL_FAILURE' AND (i.execution_id = u.latest_execution_id OR u.latest_execution_id IS NULL)) AS crawl_failure_items
+      COUNTIF(
+        i.event_name = 'CRAWL_FAILURE'
+        AND EXISTS (
+          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
+          WHERE m.batch_id = i.batch_id
+            AND m.execution_id = i.execution_id
+            AND m.is_latest_execution = TRUE
+        )
+      ) AS crawl_failure_items
     FROM `{project}.{dataset}.snapshot_item_user_wave` i
-    JOIN `{project}.{dataset}.snapshot_user_wave` u ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier
+    JOIN `{project}.{dataset}.snapshot_user_wave` u ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier AND i.data_type = u.data_type
     WHERE i.batch_id IN (SELECT batch_id FROM active_batches)
-    GROUP BY i.batch_id
+      AND i.data_type = 'Exchange Online Migration'
+    GROUP BY i.data_type, i.batch_id
   )
   SELECT
     w.data_type,
@@ -480,8 +493,8 @@ USING (
     IFNULL(SAFE_DIVIDE(IFNULL(i.successfully_migrated_items, 0) + IFNULL(i.failed_items, 0), u.user_count), 0) AS avg_items_per_user,
     IF(u.user_count = IFNULL(u.completed_user_count, 0) AND u.user_count > 0, 'Completed', 'Running') AS status
   FROM WaveBase w
-  LEFT JOIN WaveUserStats u ON w.batch_id = u.batch_id
-  LEFT JOIN ItemAggs i ON w.batch_id = i.batch_id
+  LEFT JOIN WaveUserStats u ON w.batch_id = u.batch_id AND w.data_type = u.data_type
+  LEFT JOIN ItemAggs i ON w.batch_id = i.batch_id AND w.data_type = i.data_type
 ) s
 ON t.data_type = s.data_type AND t.batch_id = s.batch_id WHEN MATCHED THEN UPDATE
 SET
@@ -550,37 +563,48 @@ USING (
       ANY_VALUE(m.batch_filter) AS batch_filter
     FROM `{project}.{dataset}.snapshot_user_wave` u
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
-      ON u.batch_id = m.batch_id
+      ON u.batch_id = m.batch_id AND u.data_type = m.data_type
     WHERE u.batch_id IN (SELECT batch_id FROM active_batches)
+      AND u.data_type = 'Exchange Online Migration'
     GROUP BY u.data_type, u.batch_id, u.user_identifier, u.is_completed
   ),
   ItemCounts AS (
     SELECT
+      i.data_type,
       i.batch_id,
       i.user_identifier,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND i.event_name IN ('CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
       ) AS total_items_migrated,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type = 'Exchange Online Email Message'
+        AND i.event_name = 'CREATE_GMAIL_MESSAGE'
       ) AS migrated_mails_count,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type = 'Exchange Online Calendar Event'
+        AND i.event_name = 'CREATE_CALENDAR_EVENT'
       ) AS migrated_calendars_count,
       COUNTIF(
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND i.source_type = 'Exchange Online Contact'
+        AND i.event_name = 'CREATE_CONTACT'
       ) AS migrated_contacts_count,
       COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
-      COUNTIF(i.event_name = 'CRAWL_FAILURE' AND (i.execution_id = u.latest_execution_id OR u.latest_execution_id IS NULL)) AS crawl_failure_items
+      COUNTIF(
+        i.event_name = 'CRAWL_FAILURE'
+        AND EXISTS (
+          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
+          WHERE m.batch_id = i.batch_id
+            AND m.execution_id = i.execution_id
+            AND m.is_latest_execution = TRUE
+        )
+      ) AS crawl_failure_items
     FROM `{project}.{dataset}.snapshot_item_user_wave` i
     JOIN `{project}.{dataset}.snapshot_user_wave` u
-      ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier
+      ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier AND i.data_type = u.data_type
     WHERE i.batch_id IN (SELECT batch_id FROM active_batches)
-    GROUP BY i.batch_id, i.user_identifier
+      AND i.data_type = 'Exchange Online Migration'
+    GROUP BY i.data_type, i.batch_id, i.user_identifier
   )
   SELECT
     b.data_type,
@@ -606,7 +630,7 @@ USING (
       ELSE 'Running'
     END AS status
   FROM UserBase b
-  LEFT JOIN ItemCounts i ON b.batch_id = i.batch_id AND b.user_identifier = i.user_identifier
+  LEFT JOIN ItemCounts i ON b.batch_id = i.batch_id AND b.user_identifier = i.user_identifier AND b.data_type = i.data_type
 ) s
 ON
   t.data_type = s.data_type
@@ -674,6 +698,7 @@ USING (
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
       ON u.data_type = m.data_type
     WHERE u.data_type IN (SELECT data_type FROM active_datatypes)
+      AND u.data_type = 'Exchange Online Migration'
     GROUP BY u.data_type, u.user_identifier
   ),
   UserOverallItems AS (
@@ -685,6 +710,7 @@ USING (
       event_status
     FROM `{project}.{dataset}.snapshot_item_user_wave`
     WHERE data_type IN (SELECT data_type FROM active_datatypes)
+      AND data_type = 'Exchange Online Migration'
     QUALIFY ROW_NUMBER() OVER (
       PARTITION BY data_type, user_identifier, source_identifier 
       ORDER BY 
@@ -698,19 +724,19 @@ USING (
       user_identifier,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+        AND event_name IN ('CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
       ) AS total_items_migrated,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type = 'Exchange Online Email Message'
+        AND event_name = 'CREATE_GMAIL_MESSAGE'
       ) AS migrated_mails_count,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type = 'Exchange Online Calendar Event'
+        AND event_name = 'CREATE_CALENDAR_EVENT'
       ) AS migrated_calendars_count,
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
-        AND source_type = 'Exchange Online Contact'
+        AND event_name = 'CREATE_CONTACT'
       ) AS migrated_contacts_count,
       COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
       COUNTIF(event_name = 'CRAWL_FAILURE') AS crawl_failure_items
@@ -875,10 +901,11 @@ SET
 
 
 -- 7. Update fact_top_errors
--- Represents the top 10 unique migration error reasons (based on title) for the latest executions across all batches.
+-- Represents the top 10 unique migration error reasons (based on title) for the latest executions across all batches, partitioned per data type.
 DELETE FROM `{project}.{dataset}.fact_top_errors` WHERE TRUE;
 
 INSERT INTO `{project}.{dataset}.fact_top_errors` (
+  data_type,
   migration_error_title,
   error_message,
   user_identifier,
@@ -886,22 +913,23 @@ INSERT INTO `{project}.{dataset}.fact_top_errors` (
 )
 WITH RankedUniqueErrors AS (
   SELECT
+    data_type,
     migration_error_title,
     error_message,
     user_identifier,
-    SUM(occurrence_count) OVER (PARTITION BY migration_error_title) AS total_occurrence_count,
+    SUM(occurrence_count) OVER (PARTITION BY data_type, migration_error_title) AS total_occurrence_count,
     ROW_NUMBER() OVER (
-      PARTITION BY migration_error_title 
+      PARTITION BY data_type, migration_error_title 
       ORDER BY occurrence_count DESC
     ) AS rn
   FROM `{project}.{dataset}.fact_migration_errors`
 )
 SELECT
+  data_type,
   migration_error_title,
   error_message,
   user_identifier,
   total_occurrence_count AS occurrence_count
 FROM RankedUniqueErrors
 WHERE rn = 1
-ORDER BY occurrence_count DESC
-LIMIT 10;
+QUALIFY ROW_NUMBER() OVER (PARTITION BY data_type ORDER BY occurrence_count DESC) <= 10;

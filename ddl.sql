@@ -116,11 +116,12 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_migration_errors`(
 
 -- fact_top_errors
 CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_top_errors`(
+  data_type STRING,
   migration_error_title STRING,
   error_message STRING,
   user_identifier STRING,
   occurrence_count INT64)
-  CLUSTER BY migration_error_title;
+  CLUSTER BY data_type, migration_error_title;
 
 -- fact_migration_timeline
 CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_migration_timeline`(

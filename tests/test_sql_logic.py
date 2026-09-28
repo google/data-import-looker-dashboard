@@ -50,6 +50,7 @@ class TestSQLLogicLocal(unittest.TestCase):
                     target_identifier VARCHAR, 
                     execution_id VARCHAR,
                     source_name VARCHAR,
+                    source_uri VARCHAR,
                     source_identifier VARCHAR,
                     source_type VARCHAR,
                     migration_error_code VARCHAR,
@@ -116,22 +117,22 @@ class TestSQLLogicLocal(unittest.TestCase):
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
             -- Migrated Item 1 (Email - Success)
-            ({now_usec - 80000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec - 80000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: 101', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user1@example.com', 'source_identifier': 'msg-1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
             -- Migrated Item 2 (Calendar - Success)
-            ({now_usec - 70000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec - 70000}, 'data_migration', 'CREATE_CALENDAR_EVENT', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: 101', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user1@example.com', 'source_identifier': 'cal-1', 'source_type': 'Exchange Online Calendar Event', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
             -- Migrated Item 3 (Contact - Success)
-            ({now_usec - 60000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec - 60000}, 'data_migration', 'CREATE_CONTACT', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: 101', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user1@example.com', 'source_identifier': 'con-1', 'source_type': 'Exchange Online Contact', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
             -- Migrated Item 4 (Email - Failed)
-            ({now_usec - 50000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Server timeout'}},
+            ({now_usec - 50000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Server timeout'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: 101', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user1@example.com', 'source_identifier': 'msg-2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': 'TIMEOUT', 'migration_error_title': 'Request Timeout'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
@@ -306,7 +307,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             ('Exchange Online Migration', 'Wave-Old', 'Old Wave Batch', 'Old Wave Batch (ID: Wave-Old)');
 
             INSERT INTO snapshot_item_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', 'msg-old', 'MIGRATED_ITEM', 'Exchange Online Email Message', 'SUCCEEDED', {old_time_usec}, 'exec-old');
+            ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', 'msg-old', 'CREATE_GMAIL_MESSAGE', 'Exchange Online Email Message', 'SUCCEEDED', {old_time_usec}, 'exec-old');
 
             INSERT INTO snapshot_user_wave VALUES 
             ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', {old_time_usec}, FALSE, 'exec-old', {old_time_usec});
@@ -352,21 +353,21 @@ class TestSQLLogicLocal(unittest.TestCase):
         # - 1 Calendar Success with Warning (SUCCEEDED_WITH_WARNINGS)
         # - 1 Failed event (FAILED)
         # - 1 Crawl Failure (event_name=CRAWL_FAILURE) -> should be filtered out from metrics
-        # - 1 Success with wrong source type -> should be filtered out from metrics
+        # - 1 Success with wrong event name -> should be filtered out from metrics
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
             -- Email Success
-            ({now_usec - 50}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec - 50}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Metrics', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user@example.com', 'source_identifier': 'i1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
             
             -- Calendar Warning
-            ({now_usec - 40}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED_WITH_WARNINGS', 'error_message': NULL}},
+            ({now_usec - 40}, 'data_migration', 'CREATE_CALENDAR_EVENT', 'migration', {{'event_status': 'SUCCEEDED_WITH_WARNINGS', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Metrics', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user@example.com', 'source_identifier': 'i2', 'source_type': 'Exchange Online Calendar Event', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
              
             -- Failed Event
-            ({now_usec - 30}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Fatal Error'}},
+            ({now_usec - 30}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Fatal Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Metrics', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user@example.com', 'source_identifier': 'i3', 'source_type': 'Exchange Online Email Message', 'migration_error_code': 'ERR-100', 'migration_error_title': 'Fatal Error'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
              
@@ -375,8 +376,8 @@ class TestSQLLogicLocal(unittest.TestCase):
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Metrics', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user@example.com', 'source_identifier': 'i4', 'source_type': 'Exchange Online Email Message', 'migration_error_code': 'CRAWL_ERR', 'migration_error_title': 'Crawl failed'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
-            -- Success with wrong source_type
-            ({now_usec - 10}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            -- Success with wrong event_name (should be filtered out from item metrics)
+            ({now_usec - 10}, 'data_migration', 'MAILBOX_FOLDER_SETTINGS', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Metrics', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'user@example.com', 'source_identifier': 'i5', 'source_type': 'Exchange Online Mailbox Folder Settings', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -461,7 +462,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 2. Log first: failure in exec-1 for msg-retry
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec - 1000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Connection reset'}},
+            ({now_usec - 1000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Connection reset'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Retry', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'msg-retry', 'source_type': 'Exchange Online Email Message', 'migration_error_code': 'CONN_RESET', 'migration_error_title': 'Connection Reset'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -477,7 +478,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 3. Log second: success in exec-2 for msg-retry (later timestamp)
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Retry', 'target_identifier': NULL, 'execution_id': 'exec-2', 'source_name': 'u@example.com', 'source_identifier': 'msg-retry', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -506,11 +507,11 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Insert failure event first, then success event shortly after, but within the same daily window run
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Timeout'}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Timeout'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Intra', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'item-dup', 'source_type': 'Exchange Online Email Message', 'migration_error_code': 'TIMEOUT', 'migration_error_title': 'Timeout'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
              
-            ({now_usec + 10}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec + 10}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Intra', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'item-dup', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -536,11 +537,11 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Insert two identical error logs (representing duplicates)
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Err', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'msg-1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
              
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Err', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'msg-1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -573,12 +574,12 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
             -- Today success
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Time', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'i1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
              
             -- 14 months ago success
-            ({old_time_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({old_time_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Time', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'i2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{old_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -611,11 +612,11 @@ class TestSQLLogicLocal(unittest.TestCase):
             INSERT INTO snapshot_user_wave VALUES 
             ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', {now_usec - 100}, TRUE, 'exec-a', {now_usec - 100});
             INSERT INTO snapshot_item_user_wave VALUES 
-            ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', 'item-a', 'MIGRATED_ITEM', 'Exchange Online Email Message', 'SUCCEEDED', {now_usec - 100}, 'exec-a');
+            ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', 'item-a', 'CREATE_GMAIL_MESSAGE', 'Exchange Online Email Message', 'SUCCEEDED', {now_usec - 100}, 'exec-a');
 
             -- Setup new in-progress wave logs
             INSERT INTO activity VALUES 
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth'}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-B', 'target_identifier': NULL, 'execution_id': 'exec-b', 'source_name': 'u-multi@example.com', 'source_identifier': 'item-b', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Auth'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -782,7 +783,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Insert failure event in activity for exec-1
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec - 1000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Failure'}},
+            ({now_usec - 1000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Failure'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Clear', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u@example.com', 'source_identifier': 'msg-err', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{(now_ts - timedelta(seconds=10)).strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -806,7 +807,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
             -- Success event for u@example.com in exec-2
             INSERT INTO activity VALUES 
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Clear', 'target_identifier': NULL, 'execution_id': 'exec-2', 'source_name': 'u@example.com', 'source_identifier': 'item-ok', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -839,7 +840,7 @@ class TestSQLLogicLocal(unittest.TestCase):
               '{(now_ts - timedelta(seconds=90)).strftime('%Y-%m-%d %H:%M:%S')}'),
 
             -- Migrated Item
-            ({now_usec - 80000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+            ({now_usec - 80000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: 123', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'msg-1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
               '{(now_ts - timedelta(seconds=80)).strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -989,7 +990,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             
             -- User 1 item failure event
             INSERT INTO activity VALUES 
-            ({now_usec + 10}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error'}},
+            ({now_usec + 10}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Fail-Test', 'target_identifier': NULL, 'execution_id': 'exec-fail', 'source_name': 'u1@example.com', 'source_identifier': 'item-1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Err'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}');
 
@@ -1001,7 +1002,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
             -- User 4 item failure event
             INSERT INTO activity VALUES 
-            ({now_usec + 30}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error'}},
+            ({now_usec + 30}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-Fail-Test', 'target_identifier': NULL, 'execution_id': 'exec-fail', 'source_name': 'u4@example.com', 'source_identifier': 'item-4', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Err'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}');
         """)
@@ -1049,39 +1050,39 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Title C: 5 occurrences (u3)
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec - 100}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+            ({now_usec - 100}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 90}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+            ({now_usec - 90}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 80}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+            ({now_usec - 80}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i3', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
             
-            ({now_usec - 70}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error B'}},
+            ({now_usec - 70}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error B'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u2@example.com', 'source_identifier': 'i4', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Internal Error'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
             
-            ({now_usec - 60}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+            ({now_usec - 60}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i5', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 50}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+            ({now_usec - 50}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i6', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 40}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+            ({now_usec - 40}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i7', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 30}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+            ({now_usec - 30}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i8', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 20}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
+            ({now_usec - 20}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error C'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u3@example.com', 'source_identifier': 'i9', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 15}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+            ({now_usec - 15}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u4@example.com', 'source_identifier': 'i10', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 10}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
+            ({now_usec - 10}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Error A'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-1', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u4@example.com', 'source_identifier': 'i11', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -1089,15 +1090,15 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Run DML
         self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
 
-        # Verify fact_top_errors has unique title rows ordered by count desc:
+        # Verify fact_top_errors has unique title rows ordered by count desc with data_type:
         # 1. Forbidden (5), u3@example.com
         # 2. Unauthorized (5), u1@example.com (sum is 5, u1 has higher count 3 than u4's 2)
         # 3. Internal Error (1), u2@example.com
-        rows = self.conn.execute("SELECT migration_error_title, occurrence_count, user_identifier FROM fact_top_errors ORDER BY occurrence_count DESC, migration_error_title").fetchall()
+        rows = self.conn.execute("SELECT data_type, migration_error_title, occurrence_count, user_identifier FROM fact_top_errors ORDER BY occurrence_count DESC, migration_error_title").fetchall()
         self.assertEqual(rows, [
-            ('Forbidden', 5, 'u3@example.com'),
-            ('Unauthorized', 5, 'u1@example.com'),
-            ('Internal Error', 1, 'u2@example.com')
+            ('Exchange Online Migration', 'Forbidden', 5, 'u3@example.com'),
+            ('Exchange Online Migration', 'Unauthorized', 5, 'u1@example.com'),
+            ('Exchange Online Migration', 'Internal Error', 1, 'u2@example.com')
         ])
 
     def test_latest_execution_per_batch_errors(self):
@@ -1115,10 +1116,10 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         self.conn.execute(f"""
             INSERT INTO activity VALUES 
-            ({now_usec - 1000}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
+            ({now_usec - 1000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Auth Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-A', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u1@example.com', 'source_identifier': 'i1', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '401', 'migration_error_title': 'Unauthorized'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
-            ({now_usec - 900}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Forbidden'}},
+            ({now_usec - 900}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Forbidden'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-A', 'target_identifier': NULL, 'execution_id': 'exec-1', 'source_name': 'u2@example.com', 'source_identifier': 'i2', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '403', 'migration_error_title': 'Forbidden'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -1142,7 +1143,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
             -- u1 fails with 500 error in exec-2
             INSERT INTO activity VALUES 
-            ({now_usec}, 'data_migration', 'MIGRATED_ITEM', 'migration', {{'event_status': 'FAILED', 'error_message': 'Internal Error'}},
+            ({now_usec}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Internal Error'}},
              {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: Wave-A', 'target_identifier': NULL, 'execution_id': 'exec-2', 'source_name': 'u1@example.com', 'source_identifier': 'i3', 'source_type': 'Exchange Online Email Message', 'migration_error_code': '500', 'migration_error_title': 'Internal'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
@@ -1154,5 +1155,29 @@ class TestSQLLogicLocal(unittest.TestCase):
         err_rows = self.conn.execute("SELECT user_identifier, migration_error_code FROM fact_migration_errors").fetchall()
         self.assertEqual(err_rows, [('u1@example.com', '500')])
 
-if __name__ == "__main__":
+    def test_top_errors_partitioning_by_datatype(self):
+        """Test that fact_top_errors partitions error ranking per data_type, limiting each to top 10."""
+        self.run_sql_file(self.ddl_path)
+
+        # Pre-populate fact_migration_errors for two distinct data types with 12 errors each
+        for i in range(12):
+            self.conn.execute(f"""
+                INSERT INTO fact_migration_errors (data_type, batch_id, migration_error_code, migration_error_title, error_message, user_identifier, occurrence_count) VALUES 
+                ('Exchange Online Migration', 'wave-1', 'CODE_EX_{i}', 'Title_EX_{i}', 'Message', 'user_ex_{i}@example.com', {i + 1}),
+                ('ThirdParty Migration', 'wave-2', 'CODE_TP_{i}', 'Title_TP_{i}', 'Message', 'user_tp_{i}@example.com', {i + 1});
+            """)
+
+        # Run DML
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Verify fact_top_errors contains exactly 10 errors for each data_type, ordered by occurrence_count DESC
+        rows_ex = self.conn.execute("SELECT occurrence_count FROM fact_top_errors WHERE data_type = 'Exchange Online Migration' ORDER BY occurrence_count DESC").fetchall()
+        rows_tp = self.conn.execute("SELECT occurrence_count FROM fact_top_errors WHERE data_type = 'ThirdParty Migration' ORDER BY occurrence_count DESC").fetchall()
+
+        self.assertEqual(len(rows_ex), 10)
+        self.assertEqual(len(rows_tp), 10)
+        self.assertEqual([r[0] for r in rows_ex], list(range(12, 2, -1)))
+        self.assertEqual([r[0] for r in rows_tp], list(range(12, 2, -1)))
+
+if __name__ == '__main__':
     unittest.main()
