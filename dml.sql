@@ -27,7 +27,11 @@ FROM
   `{project}.{dataset}.activity`
 WHERE
   record_type = 'data_migration'
-  AND data_migration.migration_type = 'Exchange Online Migration'
+  AND data_migration.migration_type IN (
+    'Exchange Online Migration',
+    'OneDrive Enterprise Migration',
+    'SharePoint Online Enterprise Migration'
+  )
   AND _PARTITIONTIME >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {lookback_days} DAY);
 
 -- Step 2: Latest Wave Names Extraction
@@ -164,6 +168,43 @@ SET
           VALUES(s.data_type, s.batch_id, s.batch_name, s.batch_filter);
 
 
+-- Step 2b: Entity Resolution Map
+-- Resolves clean site/drive URLs for OneDrive & SharePoint containers across executions and batches.
+CREATE OR REPLACE TEMP TABLE entity_resolution_map AS
+SELECT
+  m.batch_id,
+  a.data_migration.migration_type AS data_type,
+  REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') AS root_key,
+  COALESCE(
+    MAX(
+      CASE
+        WHEN a.data_migration.migration_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+          THEN NULLIF(RTRIM(REGEXP_REPLACE(a.data_migration.source_name, r'^https?://', ''), '/'), '')
+      END
+    ),
+    MAX(
+      COALESCE(
+        NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/personal/[^/?#]+)'), ''),
+        NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/:[a-z]:/[a-z]/sites/[^/?#]+)'), ''),
+        NULLIF(
+          RTRIM(
+            REGEXP_EXTRACT(
+              COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier),
+              r'https?://([^/]+/sites/[^/?#]+(?:/[^/?#]+)*?)(?:/+Shared%20Documents.*|/+Shared Documents.*|/+SitePages.*|/+Documents.*|/+Forms.*|/+Lists.*|/[^/]+\.[a-zA-Z0-9]+|/[a-zA-Z0-9_-]{20,}/?|/*$)'
+            ),
+            '/'
+          ),
+          ''
+        )
+      )
+    )
+  ) AS clean_entity_url
+FROM incremental_logs a
+JOIN `{project}.{dataset}.map_execution_wave` m
+  ON a.data_migration.execution_id = m.execution_id
+WHERE a.data_migration.source_identifier LIKE 'documentLibraries/%'
+GROUP BY m.batch_id, a.data_migration.migration_type, REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)');
+
 -- Step 5: Active Entity Tracking for Incremental Filtering
 -- Represents unique migration batches active in the current window, used to optimize downstream metric recalculations.
 CREATE OR REPLACE TEMP TABLE active_batches AS
@@ -188,11 +229,37 @@ JOIN `{project}.{dataset}.map_execution_wave` t ON s.wave_id = t.batch_id;
 
 -- Represents unique user-platform combinations active in the current window.
 CREATE OR REPLACE TEMP TABLE active_users_datatypes AS
-SELECT DISTINCT m.data_type, a.data_migration.source_name AS user_identifier
+SELECT DISTINCT
+  m.data_type,
+  COALESCE(
+    CASE
+       WHEN a.data_migration.migration_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+        THEN NULLIF(RTRIM(REGEXP_REPLACE(a.data_migration.source_name, r'^https?://', ''), '/'), '')
+      ELSE NULLIF(a.data_migration.source_name, '')
+    END,
+    erm.clean_entity_url,
+    NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/personal/[^/?#]+)'), ''),
+    NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/:[a-z]:/[a-z]/sites/[^/?#]+)'), ''),
+    NULLIF(
+      RTRIM(
+        REGEXP_EXTRACT(
+          COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier),
+          r'https?://([^/]+/sites/[^/?#]+(?:/[^/?#]+)*?)(?:/+amrJobs.*|/+Shared%20Documents.*|/+Shared Documents.*|/+SitePages.*|/+Documents.*|/+Forms.*|/+Lists.*|/[^/]+\.[a-zA-Z0-9]+|/[a-zA-Z0-9_-]{20,}/?|/*$)'
+        ),
+        '/'
+      ),
+      ''
+    ),
+    a.data_migration.source_identifier
+  ) AS user_identifier
 FROM incremental_logs a
 JOIN `{project}.{dataset}.map_execution_wave` m
   ON a.data_migration.execution_id = m.execution_id
-WHERE a.data_migration.source_name IS NOT NULL;
+LEFT JOIN entity_resolution_map erm
+  ON a.data_migration.migration_type = erm.data_type
+  AND m.batch_id = erm.batch_id
+  AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
+WHERE (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL);
 
 
 -- Step 6: Update Persistent Snapshots
@@ -204,7 +271,27 @@ WITH BaseItems AS (
   SELECT
     m.data_type,
     m.batch_id,
-    a.data_migration.source_name AS user_identifier,
+    COALESCE(
+      CASE
+        WHEN a.data_migration.migration_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+          THEN NULLIF(RTRIM(REGEXP_REPLACE(a.data_migration.source_name, r'^https?://', ''), '/'), '')
+        ELSE NULLIF(a.data_migration.source_name, '')
+      END,
+      erm.clean_entity_url,
+      NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/personal/[^/?#]+)'), ''),
+      NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/:[a-z]:/[a-z]/sites/[^/?#]+)'), ''),
+      NULLIF(
+        RTRIM(
+          REGEXP_EXTRACT(
+            COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier),
+            r'https?://([^/]+/sites/[^/?#]+(?:/[^/?#]+)*?)(?:/+amrJobs.*|/+Shared%20Documents.*|/+Shared Documents.*|/+SitePages.*|/+Documents.*|/+Forms.*|/+Lists.*|/[^/]+\.[a-zA-Z0-9]+|/[a-zA-Z0-9_-]{20,}/?|/*$)'
+          ),
+          '/'
+        ),
+        ''
+      ),
+      a.data_migration.source_identifier
+    ) AS user_identifier,
     a.data_migration.source_identifier,
     a.event_name,
     a.data_migration.source_type AS source_type,
@@ -215,10 +302,18 @@ WITH BaseItems AS (
   FROM incremental_logs a
   JOIN `{project}.{dataset}.map_execution_wave` m
     ON a.data_migration.execution_id = m.execution_id
+  LEFT JOIN entity_resolution_map erm
+    ON a.data_migration.migration_type = erm.data_type
+    AND m.batch_id = erm.batch_id
+    AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
   WHERE LOWER(a.event_type) = 'migration'
-    AND a.data_migration.source_name IS NOT NULL
+    AND (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
     AND (
-      a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+      a.event_name IN (
+        'CREATE_FILE', 'CREATE_FOLDER', 'CREATE_FILE_VERSION',
+        'CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT',
+        'CRAWL_FAILURE'
+      )
       OR a.status.event_status = 'FAILED'
     )
 ),
@@ -265,22 +360,74 @@ MERGE `{project}.{dataset}.snapshot_user_wave` t
 USING (
   WITH UserBaseStats AS (
     SELECT 
-      m.data_type, m.batch_id, a.data_migration.source_name AS user_identifier,
+      m.data_type, m.batch_id,
+      COALESCE(
+        CASE
+           WHEN a.data_migration.migration_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+            THEN NULLIF(RTRIM(REGEXP_REPLACE(a.data_migration.source_name, r'^https?://', ''), '/'), '')
+          ELSE NULLIF(a.data_migration.source_name, '')
+        END,
+        erm.clean_entity_url,
+        NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/personal/[^/?#]+)'), ''),
+        NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/:[a-z]:/[a-z]/sites/[^/?#]+)'), ''),
+        NULLIF(
+          RTRIM(
+            REGEXP_EXTRACT(
+              COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier),
+              r'https?://([^/]+/sites/[^/?#]+(?:/[^/?#]+)*?)(?:/+amrJobs.*|/+Shared%20Documents.*|/+Shared Documents.*|/+SitePages.*|/+Documents.*|/+Forms.*|/+Lists.*|/[^/]+\.[a-zA-Z0-9]+|/[a-zA-Z0-9_-]{20,}/?|/*$)'
+            ),
+            '/'
+          ),
+          ''
+        ),
+        a.data_migration.source_identifier
+      ) AS user_identifier,
       MIN(a.time_usec) AS start_time_usec,
       ARRAY_AGG(a.data_migration.execution_id ORDER BY a.time_usec DESC)[OFFSET(0)] AS latest_execution_id,
       MAX(a.time_usec) AS latest_execution_time_usec
     FROM incremental_logs a
     JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
-    WHERE a.data_migration.source_name IS NOT NULL
+    LEFT JOIN entity_resolution_map erm
+      ON a.data_migration.migration_type = erm.data_type
+      AND m.batch_id = erm.batch_id
+      AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
+    WHERE (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
     GROUP BY m.data_type, m.batch_id, user_identifier
   ),
   UserExecCompletions AS (
     SELECT DISTINCT
-      m.batch_id, a.data_migration.source_name AS user_identifier, a.data_migration.execution_id,
+      m.batch_id,
+      COALESCE(
+        CASE
+           WHEN a.data_migration.migration_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+            THEN NULLIF(RTRIM(REGEXP_REPLACE(a.data_migration.source_name, r'^https?://', ''), '/'), '')
+          ELSE NULLIF(a.data_migration.source_name, '')
+        END,
+        erm.clean_entity_url,
+        NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/personal/[^/?#]+)'), ''),
+        NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/:[a-z]:/[a-z]/sites/[^/?#]+)'), ''),
+        NULLIF(
+          RTRIM(
+            REGEXP_EXTRACT(
+              COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier),
+              r'https?://([^/]+/sites/[^/?#]+(?:/[^/?#]+)*?)(?:/+amrJobs.*|/+Shared%20Documents.*|/+Shared Documents.*|/+SitePages.*|/+Documents.*|/+Forms.*|/+Lists.*|/[^/]+\.[a-zA-Z0-9]+|/[a-zA-Z0-9_-]{20,}/?|/*$)'
+            ),
+            '/'
+          ),
+          ''
+        ),
+        a.data_migration.source_identifier
+      ) AS user_identifier,
+      a.data_migration.execution_id,
       TRUE AS is_completed
     FROM incremental_logs a
     JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
-    WHERE a.event_name = 'USER_MIGRATION_COMPLETE' AND a.data_migration.source_name IS NOT NULL
+    LEFT JOIN entity_resolution_map erm
+      ON a.data_migration.migration_type = erm.data_type
+      AND m.batch_id = erm.batch_id
+      AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
+    WHERE a.event_name = 'USER_MIGRATION_COMPLETE'
+      AND (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
   )
   SELECT 
     b.data_type, b.batch_id, b.user_identifier,
@@ -314,18 +461,42 @@ USING (
     a.data_migration.migration_error_code,
     a.data_migration.migration_error_title,
     a.status.error_message,
-    a.data_migration.source_name AS user_identifier,
+    COALESCE(
+      CASE
+         WHEN a.data_migration.migration_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+          THEN NULLIF(RTRIM(REGEXP_REPLACE(a.data_migration.source_name, r'^https?://', ''), '/'), '')
+        ELSE NULLIF(a.data_migration.source_name, '')
+      END,
+      erm.clean_entity_url,
+      NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/personal/[^/?#]+)'), ''),
+      NULLIF(REGEXP_EXTRACT(COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier), r'https?://([^/]+/:[a-z]:/[a-z]/sites/[^/?#]+)'), ''),
+      NULLIF(
+        RTRIM(
+          REGEXP_EXTRACT(
+            COALESCE(NULLIF(a.data_migration.source_uri, ''), a.data_migration.source_identifier),
+            r'https?://([^/]+/sites/[^/?#]+(?:/[^/?#]+)*?)(?:/+amrJobs.*|/+Shared%20Documents.*|/+Shared Documents.*|/+SitePages.*|/+Documents.*|/+Forms.*|/+Lists.*|/[^/]+\.[a-zA-Z0-9]+|/[a-zA-Z0-9_-]{20,}/?|/*$)'
+          ),
+          '/'
+        ),
+        ''
+      ),
+      a.data_migration.source_identifier
+    ) AS user_identifier,
     a.data_migration.execution_id,
     a.time_usec,
-    TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(a.data_migration.source_name, "")))) AS event_uuid
+    TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(COALESCE(NULLIF(a.data_migration.source_name, ''), a.data_migration.source_identifier), "")))) AS event_uuid
   FROM incremental_logs a
   JOIN `{project}.{dataset}.map_execution_wave` m
     ON a.data_migration.execution_id = m.execution_id
+  LEFT JOIN entity_resolution_map erm
+    ON a.data_migration.migration_type = erm.data_type
+    AND m.batch_id = erm.batch_id
+    AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
   WHERE a.status.event_status = 'FAILED'
     AND a.data_migration.migration_error_code IS NOT NULL
     AND a.data_migration.migration_error_code != ''
   QUALIFY ROW_NUMBER() OVER(
-    PARTITION BY m.batch_id, TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(a.data_migration.source_name, ""))))
+    PARTITION BY m.batch_id, TO_HEX(MD5(CONCAT(CAST(a.time_usec AS STRING), "|", IFNULL(a.data_migration.migration_error_code, ""), "|", IFNULL(COALESCE(NULLIF(a.data_migration.source_name, ''), a.data_migration.source_identifier), ""))))
     ORDER BY a.time_usec DESC
   ) = 1
 ) s
