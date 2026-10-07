@@ -1155,29 +1155,407 @@ class TestSQLLogicLocal(unittest.TestCase):
         err_rows = self.conn.execute("SELECT user_identifier, migration_error_code FROM fact_migration_errors").fetchall()
         self.assertEqual(err_rows, [('u1@example.com', '500')])
 
-    def test_top_errors_partitioning_by_datatype(self):
-        """Test that fact_top_errors partitions error ranking per data_type, limiting each to top 10."""
+    def test_onedrive_pipeline_logic(self):
+        """Test full pipeline execution for OneDrive file migrations (mapping, snapshots, and file fact tables)."""
         self.run_sql_file(self.ddl_path)
 
-        # Pre-populate fact_migration_errors for two distinct data types with 12 errors each
-        for i in range(12):
-            self.conn.execute(f"""
-                INSERT INTO fact_migration_errors (data_type, batch_id, migration_error_code, migration_error_title, error_message, user_identifier, occurrence_count) VALUES 
-                ('Exchange Online Migration', 'wave-1', 'CODE_EX_{i}', 'Title_EX_{i}', 'Message', 'user_ex_{i}@example.com', {i + 1}),
-                ('ThirdParty Migration', 'wave-2', 'CODE_TP_{i}', 'Title_TP_{i}', 'Message', 'user_tp_{i}@example.com', {i + 1});
-            """)
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # 1. Populate activity logs for OneDrive
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            -- Setup event
+            ({now_usec - 100000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'WaveId: OD-101', 'target_identifier': 'OneDrive Batch 1', 'execution_id': 'od-exec-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            -- Start event
+            ({now_usec - 90000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'WaveId: OD-101', 'target_identifier': NULL, 'execution_id': 'od-exec-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Migrated File 1 (Success)
+            ({now_usec - 80000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/g1', 'execution_id': 'od-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant-my.sharepoint.com/personal/user1_tenant_com/Documents/Doc1.docx', 'source_identifier': 'documentLibraries/lib1/files/f1', 'source_type': 'OneDrive Item', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Migrated Folder 1 (Success)
+            ({now_usec - 70000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/g2', 'execution_id': 'od-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant-my.sharepoint.com/personal/user1_tenant_com/Documents/Folder1', 'source_identifier': 'documentLibraries/lib1/folders/fld1', 'source_type': 'OneDrive Folder Crawler', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Migrated File 2 (Failed)
+            ({now_usec - 60000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Upload quota exceeded'}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'od-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant-my.sharepoint.com/personal/user1_tenant_com/Documents/Doc2.docx', 'source_identifier': 'documentLibraries/lib1/files/f2', 'source_type': 'OneDrive Item', 'migration_error_code': 'QUOTA_EXCEEDED', 'migration_error_title': 'Quota Exceeded'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- User complete event
+            ({now_usec - 50000}, 'data_migration', 'USER_MIGRATION_COMPLETE', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'WaveId: OD-101', 'target_identifier': NULL, 'execution_id': 'od-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant-my.sharepoint.com/personal/user1_tenant_com/Documents', 'source_identifier': 'documentLibraries/lib1', 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # 2. Run DML SQL
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # 3. Assertions on fact_file_wave_metrics
+        file_wave_rows = self.conn.execute("SELECT * FROM fact_file_wave_metrics WHERE batch_id='OD-101'").fetchall()
+        self.assertEqual(len(file_wave_rows), 1)
+        data_type, batch_id, batch_name, batch_filter, start_date, entity_count, completed_entity_count, succ_items, tot_items, files_cnt, fld_cnt, dl_cnt, succ_pct, comp_pct, avg_items, status = file_wave_rows[0]
+        self.assertEqual(data_type, "OneDrive Enterprise Migration")
+        self.assertEqual(batch_name, "OneDrive Batch 1")
+        self.assertEqual(entity_count, 1)
+        self.assertEqual(completed_entity_count, 1)
+        self.assertEqual(succ_items, 2) # 1 file + 1 folder
+        self.assertEqual(tot_items, 3) # 2 success + 1 failed
+        self.assertEqual(files_cnt, 1)
+        self.assertEqual(fld_cnt, 1)
+        self.assertEqual(dl_cnt, 1)
+        self.assertAlmostEqual(succ_pct, 2.0 / 3.0, places=4)
+        self.assertEqual(comp_pct, 1.0)
+        self.assertEqual(status, "Completed")
+
+        # 4. Assertions on fact_entity_file_wave_metrics
+        entity_wave_rows = self.conn.execute("SELECT * FROM fact_entity_file_wave_metrics WHERE batch_id='OD-101'").fetchall()
+        self.assertEqual(len(entity_wave_rows), 1)
+        e_dtype, e_bid, e_bname, e_bfilter, entity_id, e_succ_items, e_files, e_flds, e_dls, e_failed, e_crawl_fail, e_tot, e_succ_pct, e_status = entity_wave_rows[0]
+        self.assertEqual(entity_id, "tenant-my.sharepoint.com/personal/user1_tenant_com")
+        self.assertEqual(e_succ_items, 2)
+        self.assertEqual(e_files, 1)
+        self.assertEqual(e_flds, 1)
+        self.assertEqual(e_dls, 1)
+        self.assertEqual(e_failed, 1)
+        self.assertEqual(e_status, "Completed")
+
+        # 5. Assertions on fact_entity_file_overall_metrics
+        entity_overall_rows = self.conn.execute("SELECT * FROM fact_entity_file_overall_metrics WHERE entity_identifier='tenant-my.sharepoint.com/personal/user1_tenant_com'").fetchall()
+        self.assertEqual(len(entity_overall_rows), 1)
+        self.assertEqual(entity_overall_rows[0][3], 2) # total_items_migrated
+        self.assertEqual(entity_overall_rows[0][4], 1) # migrated_files_count
+        self.assertEqual(entity_overall_rows[0][5], 1) # migrated_folders_count
+        self.assertEqual(entity_overall_rows[0][6], 1) # migrated_document_libraries_count
+        self.assertEqual(entity_overall_rows[0][7], 3) # total_items
+        self.assertEqual(entity_overall_rows[0][9], "Completed") # status
+
+    def test_sharepoint_pipeline_logic(self):
+        """Test full pipeline execution for SharePoint Online Enterprise migrations (site extraction, sharing links, file metrics)."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # 1. Populate activity logs for SharePoint (2 sites: Marketing via standard URI, Engineering via sharing-link URI in source_identifier)
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            -- Setup event
+            ({now_usec - 100000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-201', 'target_identifier': 'SP Enterprise Batch 1', 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            -- Start event
+            ({now_usec - 90000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-201', 'target_identifier': NULL, 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 1: Marketing (File 1 Success)
+            ({now_usec - 80000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/sp-g1', 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant.sharepoint.com/sites/Marketing/Shared Documents/Presentation.pptx', 'source_identifier': 'documentLibraries/lib-m/files/f1', 'source_type': 'Sharepoint File', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 1: Marketing (Folder 1 Success)
+            ({now_usec - 70000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/sp-g2', 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant.sharepoint.com/sites/Marketing/Shared Documents/SubFolder', 'source_identifier': 'documentLibraries/lib-m/folders/fld1', 'source_type': 'Sharepoint Folder', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 2: Engineering (Crawler sharing link failure - source_uri is empty, site URL is in source_identifier)
+            ({now_usec - 60000}, 'data_migration', 'CRAWL_FAILURE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Crawler error accessing site collection'}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': '', 'source_identifier': 'sites/https://tenant.sharepoint.com/:f:/g/sites/Engineering/IgBq6zNVWuZSQJJhQYr8wzDrAenqRTaL6uoT04yI6UkmOds/', 'source_type': 'Sharepoint Site', 'migration_error_code': 'CRAWL_FAILED', 'migration_error_title': 'Site Crawl Failed'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 1 Complete event
+            ({now_usec - 50000}, 'data_migration', 'USER_MIGRATION_COMPLETE', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-201', 'target_identifier': NULL, 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant.sharepoint.com/sites/Marketing', 'source_identifier': 'sites/Marketing', 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # 2. Run DML SQL
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # 3. Assertions on fact_file_wave_metrics
+        file_wave_rows = self.conn.execute("SELECT * FROM fact_file_wave_metrics WHERE batch_id='SP-201'").fetchall()
+        self.assertEqual(len(file_wave_rows), 1)
+        data_type, batch_id, batch_name, batch_filter, start_date, entity_count, completed_entity_count, succ_items, tot_items, files_cnt, fld_cnt, dl_cnt, succ_pct, comp_pct, avg_items, status = file_wave_rows[0]
+        self.assertEqual(data_type, "SharePoint Online Enterprise Migration")
+        self.assertEqual(entity_count, 2) # Marketing + Engineering
+        self.assertEqual(completed_entity_count, 1) # Only Marketing completed
+        self.assertEqual(succ_items, 2) # 1 file + 1 folder
+        self.assertEqual(files_cnt, 1)
+        self.assertEqual(fld_cnt, 1)
+        self.assertEqual(dl_cnt, 1)
+        self.assertEqual(status, "Running") # Engineering not complete yet
+
+        # 4. Assertions on fact_entity_file_wave_metrics
+        entities = self.conn.execute("SELECT entity_identifier, total_items_migrated, migrated_document_libraries_count, crawl_failure_items, status FROM fact_entity_file_wave_metrics WHERE batch_id='SP-201' ORDER BY entity_identifier").fetchall()
+        self.assertEqual(len(entities), 2)
+        
+        # Engineering site extracted from sharing link
+        self.assertEqual(entities[0][0], "tenant.sharepoint.com/:f:/g/sites/Engineering")
+        self.assertEqual(entities[0][1], 0) # 0 migrated
+        self.assertEqual(entities[0][2], 0) # 0 DLs
+        self.assertEqual(entities[0][3], 1) # 1 crawl failure
+        self.assertEqual(entities[0][4], "Failed") # 0 items + 1 crawl failure -> Failed
+        
+        # Marketing site
+        self.assertEqual(entities[1][0], "tenant.sharepoint.com/sites/Marketing")
+        self.assertEqual(entities[1][1], 2) # 2 migrated
+        self.assertEqual(entities[1][2], 1) # 1 DL
+        self.assertEqual(entities[1][3], 0)
+        self.assertEqual(entities[1][4], "Completed")
+
+    def test_sharepoint_subsite_and_dl_counting(self):
+        """Test SharePoint sites with subsites and multiple document libraries (matching real scenario 1)."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # Site1 (has 2 DLs: Shared Documents & SitePages), Site1/subsite1 (has 2 DLs: Shared Documents & SitePages)
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            -- Setup event
+            ({now_usec - 100000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-SUBSITES', 'target_identifier': 'SP Subsites Batch', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            -- Start event
+            ({now_usec - 90000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-SUBSITES', 'target_identifier': NULL, 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 1 Container Setup (Source type: Sharepoint Site -> should NOT be counted in folder count!)
+            ({now_usec - 85000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/root1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1', 'source_identifier': 'sites/https://smh3v.sharepoint.com/sites/Site1/', 'source_type': 'Sharepoint Site', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 1: DL 1 (/Shared Documents) -> 1 File, 1 Folder
+            ({now_usec - 80000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/f1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1//Shared Documents/File1.docx', 'source_identifier': 'documentLibraries/4c433867-be53-4240-aefe-aa1612bf1363/files/5396a7ec', 'source_type': 'Sharepoint File', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 78000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/fld1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1/Shared Documents/Folder1', 'source_identifier': 'documentLibraries/4c433867-be53-4240-aefe-aa1612bf1363/folders/df316493', 'source_type': 'Sharepoint Folder', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site 1: DL 2 (/SitePages) -> 1 File
+            ({now_usec - 75000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/f2', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1//SitePages/Home.aspx', 'source_identifier': 'documentLibraries/22a0a0da-2a83-421a-a0ce-94d4172147b6/files/c3ff3352', 'source_type': 'Sharepoint File', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Subsite 1 Container Setup (Source type: Sharepoint Site)
+            ({now_usec - 70000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/subroot1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1/subsite1', 'source_identifier': 'sites/https://smh3v.sharepoint.com/sites/Site1/subsite1', 'source_type': 'Sharepoint Site', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Subsite 1: DL 1 (/Shared Documents) -> 1 Folder
+            ({now_usec - 65000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/subfld1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1/subsite1/Shared Documents', 'source_identifier': 'documentLibraries/00bcca06-132d-4fb6-ab40-77f14339f19c/folders/', 'source_type': 'Sharepoint Folder', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Subsite 1: DL 2 (/SitePages) -> 1 File
+            ({now_usec - 60000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/subf1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1/subsite1/SitePages/Home.aspx', 'source_identifier': 'documentLibraries/66db3539-ba37-4c2f-afe3-1d6c26f8dab7/files/c48a9f8e', 'source_type': 'Sharepoint File', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
 
         # Run DML
         self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
 
-        # Verify fact_top_errors contains exactly 10 errors for each data_type, ordered by occurrence_count DESC
-        rows_ex = self.conn.execute("SELECT occurrence_count FROM fact_top_errors WHERE data_type = 'Exchange Online Migration' ORDER BY occurrence_count DESC").fetchall()
-        rows_tp = self.conn.execute("SELECT occurrence_count FROM fact_top_errors WHERE data_type = 'ThirdParty Migration' ORDER BY occurrence_count DESC").fetchall()
+        # Assert entity level
+        entities = self.conn.execute("SELECT entity_identifier, migrated_files_count, migrated_folders_count, migrated_document_libraries_count, status FROM fact_entity_file_wave_metrics WHERE batch_id='SP-SUBSITES' ORDER BY entity_identifier").fetchall()
+        self.assertEqual(len(entities), 2)
 
-        self.assertEqual(len(rows_ex), 10)
-        self.assertEqual(len(rows_tp), 10)
-        self.assertEqual([r[0] for r in rows_ex], list(range(12, 2, -1)))
-        self.assertEqual([r[0] for r in rows_tp], list(range(12, 2, -1)))
+        # Site1
+        self.assertEqual(entities[0][0], "smh3v.sharepoint.com/sites/Site1")
+        self.assertEqual(entities[0][1], 2) # 2 files (File1.docx, Home.aspx)
+        self.assertEqual(entities[0][2], 1) # 1 folder (Folder1, root site excluded!)
+        self.assertEqual(entities[0][3], 2) # 2 DLs (4c43... and 22a0...)
+        self.assertEqual(entities[0][4], "Completed")
 
-if __name__ == '__main__':
+        # Subsite1
+        self.assertEqual(entities[1][0], "smh3v.sharepoint.com/sites/Site1/subsite1")
+        self.assertEqual(entities[1][1], 1) # 1 file (Home.aspx)
+        self.assertEqual(entities[1][2], 1) # 1 folder (Shared Documents, subroot excluded!)
+        self.assertEqual(entities[1][3], 2) # 2 DLs (00bc... and 66db...)
+        self.assertEqual(entities[1][4], "Completed")
+
+        # Assert batch level
+        batch = self.conn.execute("SELECT entity_count, completed_entity_count, migrated_files_count, migrated_folders_count, migrated_document_libraries_count, status FROM fact_file_wave_metrics WHERE batch_id='SP-SUBSITES'").fetchall()
+        self.assertEqual(len(batch), 1)
+        self.assertEqual(batch[0][0], 2) # 2 entities
+        self.assertEqual(batch[0][1], 2) # 2 completed entities
+        self.assertEqual(batch[0][2], 3) # 3 files total
+        self.assertEqual(batch[0][3], 2) # 2 folders total
+        self.assertEqual(batch[0][4], 4) # 4 DLs total (2 + 2)
+        self.assertEqual(batch[0][5], "Completed")
+
+    def test_entity_unification_logic(self):
+        """Test that Run 1 crawl failure (NULL source_uri) unifies with Run 2 file creation under the same clean URL."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # Populate Run 1 (crawl failure with NULL source_uri) and Run 2 (success with clean source_uri) for the same document library
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            -- Setup event
+            ({now_usec - 100000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: OD-UNIFY', 'target_identifier': 'OneDrive Unify Batch', 'execution_id': 'exec-unify-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            -- Run 1 Start
+            ({now_usec - 90000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: OD-UNIFY', 'target_identifier': NULL, 'execution_id': 'exec-unify-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Run 1: Crawl failure (source_uri is NULL, source_identifier is documentLibraries/lib-guid/folders/)
+            ({now_usec - 80000}, 'data_migration', 'CRAWL_FAILURE', 'migration', {{'event_status': 'FAILED', 'error_message': 'Discovery failure'}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'exec-unify-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': 'documentLibraries/f6226517-690c-4b9d-ac74-9bff2c99c78a/folders/', 'source_type': 'OneDrive Folder', 'migration_error_code': 'CRAWL_FAILED', 'migration_error_title': 'Crawl Failed'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Run 2 Start
+            ({now_usec - 70000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: OD-UNIFY', 'target_identifier': NULL, 'execution_id': 'exec-unify-2', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Run 2: File Success (source_uri populated with personal URL, source_identifier is documentLibraries/lib-guid/files/f1)
+            ({now_usec - 60000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/g1', 'execution_id': 'exec-unify-2', 'source_name': NULL, 'source_uri': 'https://tenant-my.sharepoint.com/personal/bugbash1_tenant_com/Documents/Test3.txt', 'source_identifier': 'documentLibraries/f6226517-690c-4b9d-ac74-9bff2c99c78a/files/b2aac29f-f99f-4752-b407-36dbbf04ab30', 'source_type': 'OneDrive Item', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # Run DML
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Assert exactly 1 unified entity row exists for that document library
+        entities = self.conn.execute("SELECT entity_identifier, total_items_migrated, crawl_failure_items FROM fact_entity_file_wave_metrics WHERE batch_id='OD-UNIFY'").fetchall()
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0][0], "tenant-my.sharepoint.com/personal/bugbash1_tenant_com")
+        self.assertEqual(entities[0][1], 1) # 1 item migrated from Run 2
+
+    def test_multidatatype_coexistence(self):
+        """Test concurrent processing of Exchange, OneDrive, and SharePoint migrations in the same pipeline run."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            -- 1. Exchange Online
+            ({now_usec - 60000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: EX-1', 'target_identifier': 'Exchange Batch', 'execution_id': 'ex-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 55000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: EX-1', 'target_identifier': NULL, 'execution_id': 'ex-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 50000}, 'data_migration', 'CREATE_GMAIL_MESSAGE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'Exchange Online Migration', 'target_uri': 'WaveId: EX-1', 'target_identifier': NULL, 'execution_id': 'ex-1', 'source_name': 'ex_user@example.com', 'source_uri': NULL, 'source_identifier': 'msg-10', 'source_type': 'Exchange Online Email Message', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- 2. OneDrive
+            ({now_usec - 40000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'WaveId: OD-1', 'target_identifier': 'OneDrive Batch', 'execution_id': 'od-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 35000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'WaveId: OD-1', 'target_identifier': NULL, 'execution_id': 'od-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 30000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'OneDrive Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/g1', 'execution_id': 'od-1', 'source_name': NULL, 'source_uri': 'https://tenant-my.sharepoint.com/personal/od_user_tenant_com/Documents/file.pdf', 'source_identifier': 'files/od-10', 'source_type': 'OneDrive Item', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- 3. SharePoint
+            ({now_usec - 20000}, 'data_migration', 'START_MIGRATION_SETUP', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-1', 'target_identifier': 'SharePoint Batch', 'execution_id': 'sp-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 15000}, 'data_migration', 'START_MIGRATION', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-1', 'target_identifier': NULL, 'execution_id': 'sp-1', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 10000}, 'data_migration', 'CREATE_FOLDER', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'folders/g1', 'execution_id': 'sp-1', 'source_name': NULL, 'source_uri': 'https://tenant.sharepoint.com/sites/Legal/Docs', 'source_identifier': 'folders/sp-10', 'source_type': 'Sharepoint Folder', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # Run DML
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Assert fact_datatype_metrics has all 3 data types
+        datatypes = self.conn.execute("SELECT data_type, total_users_migrated, success_percentage FROM fact_datatype_metrics ORDER BY data_type").fetchall()
+        self.assertEqual(len(datatypes), 3)
+        self.assertEqual(datatypes[0][0], "Exchange Online Migration")
+        self.assertEqual(datatypes[1][0], "OneDrive Enterprise Migration")
+        self.assertEqual(datatypes[2][0], "SharePoint Online Enterprise Migration")
+
+        # Assert Exchange fact table only has Exchange wave
+        ex_waves = self.conn.execute("SELECT batch_id FROM fact_wave_metrics").fetchall()
+        self.assertEqual(ex_waves, [("EX-1",)])
+
+        # Assert File fact table only has OneDrive and SharePoint waves
+        file_waves = self.conn.execute("SELECT batch_id, data_type FROM fact_file_wave_metrics ORDER BY batch_id").fetchall()
+        self.assertEqual(file_waves, [("OD-1", "OneDrive Enterprise Migration"), ("SP-1", "SharePoint Online Enterprise Migration")])
+
+        # Assert Timeline includes all 3 events
+        timeline_rows = self.conn.execute("SELECT data_type, items_migrated FROM fact_migration_timeline ORDER BY data_type").fetchall()
+        self.assertEqual(len(timeline_rows), 3)
+
+    def test_onedrive_amr_crawl_failure_resolution(self):
+        """Test that OneDrive amrJobs crawl failure URLs are cleanly resolved to personal/account_name."""
+        self.run_sql_file(self.ddl_path)
+
+        now_ts = datetime.utcnow()
+        now_usec = int(now_ts.timestamp() * 1_000_000)
+
+        # Setup mapping
+        self.conn.execute(f"""
+            INSERT INTO map_execution_wave VALUES 
+            ('SharePoint Online Enterprise Migration', 'Wave-Fail', 'Wave Fail', 'Wave Fail Filter', 'exec-fail', TRUE);
+        """)
+
+        # Insert 3 events from user's crawl failure sheet
+        self.conn.execute(f"""
+            INSERT INTO activity VALUES 
+            ({now_usec - 300}, 'data_migration', 'START_MIGRATION', 'MIGRATION_SETUP', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: Wave-Fail, ExecutionType: Full', 'target_identifier': NULL, 'execution_id': 'exec-fail', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': NULL, 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            ({now_usec - 200}, 'data_migration', 'CRAWL_FAILURE', 'MIGRATION', {{'event_status': 'FAILED', 'error_message': 'Target email not found'}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': 'users/user1@example.com', 'execution_id': 'exec-fail', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': 'https://smh3v-my.sharepoint.com/personal/bugbash1_smh3v_onmicrosoft_com/amrJobs/scopes/Documents', 'source_type': 'Sharepoint Document Library Crawler Phase 1', 'migration_error_code': 'C002', 'migration_error_title': 'TargetUserExternal'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            
+            ({now_usec - 100}, 'data_migration', 'CRAWL_FAILURE', 'MIGRATION', {{'event_status': 'FAILED', 'error_message': 'Target email not found'}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': 'users/user2@example.com', 'execution_id': 'exec-fail', 'source_name': NULL, 'source_uri': NULL, 'source_identifier': 'https://smh3v-my.sharepoint.com/personal/bugbash2_smh3v_onmicrosoft_com/amrJobs/scopes/Documents', 'source_type': 'Sharepoint Document Library Crawler Phase 1', 'migration_error_code': 'C002', 'migration_error_title': 'TargetUserExternal'}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
+        """)
+
+        # Run DML
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Verify fact_entity_file_wave_metrics has the clean URLs
+        entities = self.conn.execute("SELECT entity_identifier, crawl_failure_items, status FROM fact_entity_file_wave_metrics ORDER BY entity_identifier").fetchall()
+        self.assertEqual(len(entities), 2)
+        self.assertEqual(entities[0], ('smh3v-my.sharepoint.com/personal/bugbash1_smh3v_onmicrosoft_com', 1, 'Failed'))
+        self.assertEqual(entities[1], ('smh3v-my.sharepoint.com/personal/bugbash2_smh3v_onmicrosoft_com', 1, 'Failed'))
+
+        # Verify batch status is Failed
+        wave_status = self.conn.execute("SELECT status, entity_count, completed_entity_count FROM fact_file_wave_metrics WHERE batch_id='Wave-Fail'").fetchone()
+        self.assertEqual(wave_status, ('Failed', 2, 0))
+
+        # Verify fact_top_errors contains the failure
+        top_err = self.conn.execute("SELECT data_type, migration_error_title, occurrence_count FROM fact_top_errors WHERE migration_error_title='TargetUserExternal'").fetchone()
+        self.assertEqual(top_err, ('SharePoint Online Enterprise Migration', 'TargetUserExternal', 2))
+
+if __name__ == "__main__":
     unittest.main()
+
+
+
