@@ -808,7 +808,7 @@ ON
   AND t.batch_id = s.batch_id
   AND t.user_identifier
     = s.user_identifier
-      WHEN MATCHED
+       WHEN MATCHED
         THEN UPDATE
 SET
   t.batch_name = s.batch_name,
@@ -971,7 +971,440 @@ SET
             s.success_rate_percentage,
             s.status);
 
--- 5. Update fact_migration_errors
+-- 5. Merge fact_file_wave_metrics
+-- Batch-level metrics for all file migrations (OneDrive & SharePoint).
+MERGE `{project}.{dataset}.fact_file_wave_metrics` t
+USING (
+  WITH EntityMetrics AS (
+    SELECT
+      i.data_type,
+      i.batch_id,
+      i.user_identifier AS entity_identifier,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.event_name = 'CREATE_FILE'
+      ) AS migrated_files_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.event_name = 'CREATE_FOLDER'
+        AND IFNULL(i.source_type, '') != 'Sharepoint Site'
+      ) AS migrated_folders_count,
+      COUNT(DISTINCT CASE 
+        WHEN LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+             AND LOWER(i.source_identifier) LIKE 'documentlibraries/%'
+        THEN REGEXP_EXTRACT(i.source_identifier, r'^(documentLibraries/[^/]+)')
+      END) AS migrated_document_libraries_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.event_name IN ('CREATE_FILE', 'CREATE_FOLDER')
+        AND (i.event_name != 'CREATE_FOLDER' OR IFNULL(i.source_type, '') != 'Sharepoint Site')
+      ) AS total_items_migrated,
+      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(
+        i.event_name = 'CRAWL_FAILURE'
+        AND EXISTS (
+          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
+          WHERE m.batch_id = i.batch_id
+            AND m.execution_id = i.execution_id
+            AND m.is_latest_execution = TRUE
+        )
+      ) AS crawl_failure_items
+    FROM `{project}.{dataset}.snapshot_item_user_wave` i
+    JOIN `{project}.{dataset}.snapshot_user_wave` u
+      ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier AND i.data_type = u.data_type
+    WHERE i.batch_id IN (SELECT batch_id FROM active_batches)
+      AND i.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+    GROUP BY i.data_type, i.batch_id, entity_identifier
+  ),
+  EntityStatusComputed AS (
+    SELECT
+      data_type,
+      batch_id,
+      entity_identifier,
+      migrated_files_count,
+      migrated_folders_count,
+      migrated_document_libraries_count,
+      total_items_migrated,
+      failed_items,
+      crawl_failure_items,
+      CASE
+        WHEN IFNULL(total_items_migrated, 0) = 0 AND (IFNULL(failed_items, 0) > 0 OR IFNULL(crawl_failure_items, 0) > 0) THEN 'Failed'
+        WHEN IFNULL(total_items_migrated, 0) > 0 THEN 'Completed'
+        ELSE 'Running'
+      END AS entity_status
+    FROM EntityMetrics
+  ),
+  WaveEntityStats AS (
+    SELECT
+      u.data_type,
+      u.batch_id,
+      MIN(TIMESTAMP_MICROS(u.start_time_usec)) AS start_date,
+      COUNT(DISTINCT u.user_identifier) AS entity_count,
+      COUNTIF(e.entity_status = 'Completed') AS completed_entity_count,
+      COUNTIF(e.entity_status = 'Failed') AS failed_entity_count,
+      SUM(IFNULL(e.migrated_files_count, 0)) AS migrated_files_count,
+      SUM(IFNULL(e.migrated_folders_count, 0)) AS migrated_folders_count,
+      SUM(IFNULL(e.migrated_document_libraries_count, 0)) AS migrated_document_libraries_count,
+      SUM(IFNULL(e.total_items_migrated, 0)) AS successfully_migrated_items,
+      SUM(IFNULL(e.failed_items, 0)) AS failed_items
+    FROM `{project}.{dataset}.snapshot_user_wave` u
+    LEFT JOIN EntityStatusComputed e 
+      ON u.batch_id = e.batch_id AND u.user_identifier = e.entity_identifier AND u.data_type = e.data_type
+    WHERE u.batch_id IN (SELECT batch_id FROM active_batches)
+      AND u.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+    GROUP BY u.data_type, u.batch_id
+  ),
+  WaveBase AS (
+    SELECT DISTINCT
+      data_type,
+      batch_id,
+      batch_name,
+      batch_filter
+    FROM `{project}.{dataset}.map_execution_wave`
+    WHERE batch_id IN (SELECT batch_id FROM active_batches)
+      AND data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+  )
+  SELECT
+    w.data_type,
+    w.batch_id,
+    w.batch_name,
+    w.batch_filter,
+    u.start_date,
+    IFNULL(u.entity_count, 0) AS entity_count,
+    IFNULL(u.completed_entity_count, 0) AS completed_entity_count,
+    IFNULL(u.successfully_migrated_items, 0) AS successfully_migrated_items,
+    IFNULL(u.successfully_migrated_items, 0) + IFNULL(u.failed_items, 0) AS total_migrated_items,
+    IFNULL(u.migrated_files_count, 0) AS migrated_files_count,
+    IFNULL(u.migrated_folders_count, 0) AS migrated_folders_count,
+    IFNULL(u.migrated_document_libraries_count, 0) AS migrated_document_libraries_count,
+    IFNULL(
+      SAFE_DIVIDE(
+        u.successfully_migrated_items,
+        u.successfully_migrated_items + IFNULL(u.failed_items, 0)),
+      0) AS success_percentage,
+    IFNULL(SAFE_DIVIDE(u.completed_entity_count, u.entity_count), 0) AS completion_percentage,
+    IFNULL(SAFE_DIVIDE(IFNULL(u.successfully_migrated_items, 0) + IFNULL(u.failed_items, 0), u.entity_count), 0) AS avg_items_per_entity,
+    CASE
+      WHEN u.entity_count > 0 AND u.completed_entity_count = 0 AND u.failed_entity_count > 0 THEN 'Failed'
+      WHEN u.entity_count > 0 AND u.entity_count = u.completed_entity_count THEN 'Completed'
+      ELSE 'Running'
+    END AS status
+  FROM WaveBase w
+  LEFT JOIN WaveEntityStats u ON w.batch_id = u.batch_id AND w.data_type = u.data_type
+) s
+ON t.data_type = s.data_type AND t.batch_id = s.batch_id WHEN MATCHED THEN UPDATE
+SET
+  t.batch_name = s.batch_name,
+  t.batch_filter = s.batch_filter,
+  t.start_date = s.start_date,
+  t.entity_count = s.entity_count,
+  t.completed_entity_count = s.completed_entity_count,
+  t.successfully_migrated_items = s.successfully_migrated_items,
+  t.total_migrated_items = s.total_migrated_items,
+  t.migrated_files_count = s.migrated_files_count,
+  t.migrated_folders_count = s.migrated_folders_count,
+  t.migrated_document_libraries_count = s.migrated_document_libraries_count,
+  t.success_percentage = s.success_percentage,
+  t.completion_percentage = s.completion_percentage,
+  t.avg_items_per_entity = s.avg_items_per_entity,
+  t.status = s.status
+WHEN NOT MATCHED THEN INSERT(
+  data_type,
+  batch_id,
+  batch_name,
+  batch_filter,
+  start_date,
+  entity_count,
+  completed_entity_count,
+  successfully_migrated_items,
+  total_migrated_items,
+  migrated_files_count,
+  migrated_folders_count,
+  migrated_document_libraries_count,
+  success_percentage,
+  completion_percentage,
+  avg_items_per_entity,
+  status
+) VALUES(
+  s.data_type,
+  s.batch_id,
+  s.batch_name,
+  s.batch_filter,
+  s.start_date,
+  s.entity_count,
+  s.completed_entity_count,
+  s.successfully_migrated_items,
+  s.total_migrated_items,
+  s.migrated_files_count,
+  s.migrated_folders_count,
+  s.migrated_document_libraries_count,
+  s.success_percentage,
+  s.completion_percentage,
+  s.avg_items_per_entity,
+  s.status
+);
+
+-- 6. Merge fact_entity_file_wave_metrics
+-- Entity-level scorecard per batch for all file migrations (OneDrive & SharePoint).
+MERGE `{project}.{dataset}.fact_entity_file_wave_metrics` t
+USING (
+  WITH EntityBase AS (
+    SELECT
+      u.data_type,
+      u.batch_id,
+      u.user_identifier AS entity_identifier,
+      ANY_VALUE(m.batch_name) AS batch_name,
+      ANY_VALUE(m.batch_filter) AS batch_filter
+    FROM `{project}.{dataset}.snapshot_user_wave` u
+    LEFT JOIN `{project}.{dataset}.map_execution_wave` m
+      ON u.batch_id = m.batch_id AND u.data_type = m.data_type
+    WHERE u.batch_id IN (SELECT batch_id FROM active_batches)
+      AND u.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+    GROUP BY u.data_type, u.batch_id, entity_identifier
+  ),
+  ItemCounts AS (
+    SELECT
+      i.data_type,
+      i.batch_id,
+      i.user_identifier AS entity_identifier,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.event_name IN ('CREATE_FILE', 'CREATE_FOLDER')
+        AND (i.event_name != 'CREATE_FOLDER' OR IFNULL(i.source_type, '') != 'Sharepoint Site')
+      ) AS total_items_migrated,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.event_name = 'CREATE_FILE'
+      ) AS migrated_files_count,
+      COUNTIF(
+        LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND i.event_name = 'CREATE_FOLDER'
+        AND IFNULL(i.source_type, '') != 'Sharepoint Site'
+      ) AS migrated_folders_count,
+      COUNT(DISTINCT CASE 
+        WHEN LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings') 
+             AND LOWER(i.source_identifier) LIKE 'documentlibraries/%'
+        THEN REGEXP_EXTRACT(i.source_identifier, r'^(documentLibraries/[^/]+)')
+      END) AS migrated_document_libraries_count,
+      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(
+        i.event_name = 'CRAWL_FAILURE'
+        AND EXISTS (
+          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
+          WHERE m.batch_id = i.batch_id
+            AND m.execution_id = i.execution_id
+            AND m.is_latest_execution = TRUE
+        )
+      ) AS crawl_failure_items
+    FROM `{project}.{dataset}.snapshot_item_user_wave` i
+    JOIN `{project}.{dataset}.snapshot_user_wave` u
+      ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier AND i.data_type = u.data_type
+    WHERE i.batch_id IN (SELECT batch_id FROM active_batches)
+      AND i.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+    GROUP BY i.data_type, i.batch_id, entity_identifier
+  )
+  SELECT
+    b.data_type,
+    b.batch_id,
+    b.batch_name,
+    b.batch_filter,
+    b.entity_identifier,
+    IFNULL(i.total_items_migrated, 0) AS total_items_migrated,
+    IFNULL(i.migrated_files_count, 0) AS migrated_files_count,
+    IFNULL(i.migrated_folders_count, 0) AS migrated_folders_count,
+    IFNULL(i.migrated_document_libraries_count, 0) AS migrated_document_libraries_count,
+    IFNULL(i.failed_items, 0) AS failed_items,
+    IFNULL(i.crawl_failure_items, 0) AS crawl_failure_items,
+    IFNULL(i.total_items_migrated, 0) + IFNULL(i.failed_items, 0) AS total_items,
+    IFNULL(
+      SAFE_DIVIDE(
+        i.total_items_migrated,
+        i.total_items_migrated + IFNULL(i.failed_items, 0)),
+      0) AS success_rate_percentage,
+    CASE
+      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
+      WHEN IFNULL(i.total_items_migrated, 0) > 0 THEN 'Completed'
+      ELSE 'Running'
+    END AS status
+  FROM EntityBase b
+  LEFT JOIN ItemCounts i ON b.batch_id = i.batch_id AND b.entity_identifier = i.entity_identifier AND b.data_type = i.data_type
+) s
+ON
+  t.data_type = s.data_type
+  AND t.batch_id = s.batch_id
+  AND t.entity_identifier = s.entity_identifier
+WHEN MATCHED THEN UPDATE SET
+  t.batch_name = s.batch_name,
+  t.batch_filter = s.batch_filter,
+  t.total_items_migrated = s.total_items_migrated,
+  t.migrated_files_count = s.migrated_files_count,
+  t.migrated_folders_count = s.migrated_folders_count,
+  t.migrated_document_libraries_count = s.migrated_document_libraries_count,
+  t.failed_items = s.failed_items,
+  t.crawl_failure_items = s.crawl_failure_items,
+  t.total_items = s.total_items,
+  t.success_rate_percentage = s.success_rate_percentage,
+  t.status = s.status
+WHEN NOT MATCHED THEN INSERT(
+  data_type,
+  batch_id,
+  batch_name,
+  batch_filter,
+  entity_identifier,
+  total_items_migrated,
+  migrated_files_count,
+  migrated_folders_count,
+  migrated_document_libraries_count,
+  failed_items,
+  crawl_failure_items,
+  total_items,
+  success_rate_percentage,
+  status
+) VALUES(
+  s.data_type,
+  s.batch_id,
+  s.batch_name,
+  s.batch_filter,
+  s.entity_identifier,
+  s.total_items_migrated,
+  s.migrated_files_count,
+  s.migrated_folders_count,
+  s.migrated_document_libraries_count,
+  s.failed_items,
+  s.crawl_failure_items,
+  s.total_items,
+  s.success_rate_percentage,
+  s.status
+);
+
+-- 7. Merge fact_entity_file_overall_metrics
+-- Lifetime scorecard for entities across all batches (OneDrive & SharePoint).
+MERGE `{project}.{dataset}.fact_entity_file_overall_metrics` t
+USING (
+  WITH EntityBase AS (
+    SELECT
+      u.data_type,
+      u.user_identifier AS entity_identifier,
+      ANY_VALUE(m.batch_filter) AS batch_filter
+    FROM `{project}.{dataset}.snapshot_user_wave` u
+    LEFT JOIN `{project}.{dataset}.map_execution_wave` m
+      ON u.data_type = m.data_type
+    WHERE u.data_type IN (SELECT data_type FROM active_datatypes)
+      AND u.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+    GROUP BY u.data_type, entity_identifier
+  ),
+  EntityOverallItems AS (
+    SELECT
+      i.data_type,
+      i.user_identifier AS entity_identifier,
+      i.source_identifier,
+      i.event_name,
+      i.source_type,
+      i.event_status,
+      i.batch_id,
+      i.execution_id
+    FROM `{project}.{dataset}.snapshot_item_user_wave` i
+    WHERE i.data_type IN (SELECT data_type FROM active_datatypes)
+      AND i.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+    QUALIFY ROW_NUMBER() OVER (
+      PARTITION BY i.data_type, i.user_identifier, i.source_identifier 
+      ORDER BY 
+        CASE WHEN LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings') THEN 1 ELSE 2 END ASC,
+        i.time_usec DESC
+    ) = 1
+  ),
+  ItemCounts AS (
+    SELECT
+      data_type,
+      entity_identifier,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND event_name IN ('CREATE_FILE', 'CREATE_FOLDER')
+        AND (event_name != 'CREATE_FOLDER' OR IFNULL(source_type, '') != 'Sharepoint Site')
+      ) AS total_items_migrated,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND event_name = 'CREATE_FILE'
+      ) AS migrated_files_count,
+      COUNTIF(
+        LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
+        AND event_name = 'CREATE_FOLDER'
+        AND IFNULL(source_type, '') != 'Sharepoint Site'
+      ) AS migrated_folders_count,
+      COUNT(DISTINCT CASE 
+        WHEN LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings') 
+             AND LOWER(source_identifier) LIKE 'documentlibraries/%'
+        THEN REGEXP_EXTRACT(source_identifier, r'^(documentLibraries/[^/]+)')
+      END) AS migrated_document_libraries_count,
+      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(
+        event_name = 'CRAWL_FAILURE'
+        AND EXISTS (
+          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
+          WHERE m.batch_id = EntityOverallItems.batch_id
+            AND m.execution_id = EntityOverallItems.execution_id
+            AND m.is_latest_execution = TRUE
+        )
+      ) AS crawl_failure_items
+    FROM EntityOverallItems
+    GROUP BY data_type, entity_identifier
+  )
+  SELECT
+    b.entity_identifier,
+    b.data_type,
+    b.batch_filter,
+    IFNULL(i.total_items_migrated, 0) AS total_items_migrated,
+    IFNULL(i.migrated_files_count, 0) AS migrated_files_count,
+    IFNULL(i.migrated_folders_count, 0) AS migrated_folders_count,
+    IFNULL(i.migrated_document_libraries_count, 0) AS migrated_document_libraries_count,
+    IFNULL(i.total_items_migrated, 0) + IFNULL(i.failed_items, 0) AS total_items,
+    IFNULL(
+      SAFE_DIVIDE(
+        i.total_items_migrated,
+        i.total_items_migrated + IFNULL(i.failed_items, 0)),
+      0) AS success_rate_percentage,
+    CASE
+      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
+      WHEN IFNULL(i.total_items_migrated, 0) > 0 THEN 'Completed'
+      ELSE 'Running'
+    END AS status
+  FROM EntityBase b
+  LEFT JOIN ItemCounts i ON b.data_type = i.data_type AND b.entity_identifier = i.entity_identifier
+) s
+ON t.data_type = s.data_type AND t.entity_identifier = s.entity_identifier WHEN MATCHED THEN UPDATE SET
+  t.batch_filter = s.batch_filter,
+  t.total_items_migrated = s.total_items_migrated,
+  t.migrated_files_count = s.migrated_files_count,
+  t.migrated_folders_count = s.migrated_folders_count,
+  t.migrated_document_libraries_count = s.migrated_document_libraries_count,
+  t.total_items = s.total_items,
+  t.success_rate_percentage = s.success_rate_percentage,
+  t.status = s.status
+WHEN NOT MATCHED THEN INSERT(
+  entity_identifier,
+  data_type,
+  batch_filter,
+  total_items_migrated,
+  migrated_files_count,
+  migrated_folders_count,
+  migrated_document_libraries_count,
+  total_items,
+  success_rate_percentage,
+  status
+) VALUES(
+  s.entity_identifier,
+  s.data_type,
+  s.batch_filter,
+  s.total_items_migrated,
+  s.migrated_files_count,
+  s.migrated_folders_count,
+  s.migrated_document_libraries_count,
+  s.total_items,
+  s.success_rate_percentage,
+  s.status
+);
+
+-- 8. Update fact_migration_errors
 -- Represents the pre-aggregated blocker summary tracking specific error code frequencies per user and per batch.
 DELETE FROM `{project}.{dataset}.fact_migration_errors`
 WHERE batch_id IN (SELECT batch_id FROM active_batches);
@@ -1005,7 +1438,7 @@ WHERE s.batch_id IN (SELECT batch_id FROM active_batches)
   AND m.is_latest_execution = TRUE
 GROUP BY s.data_type, s.batch_id, s.migration_error_code, s.error_message, s.user_identifier;
 
--- 6. Merge fact_migration_timeline
+-- 9. Merge fact_migration_timeline
 -- Represents the daily throughput velocity mapping distinct successful items migrated per day over a rolling 1-year window.
 MERGE `{project}.{dataset}.fact_migration_timeline` t
 USING (
@@ -1028,7 +1461,7 @@ USING (
     WHERE
       LOWER(a.event_type) = 'migration'
       AND LOWER(a.status.event_status) IN ('succeeded', 'succeeded_with_warnings')
-      AND a.data_migration.source_type IN ('Exchange Online Calendar Event', 'Exchange Online Email Message', 'Exchange Online Contact')
+      AND a.event_name IN ('CREATE_FILE', 'CREATE_FOLDER', 'CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
       AND DATE(TIMESTAMP_MICROS(a.time_usec)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)
   )
   SELECT
@@ -1071,7 +1504,7 @@ SET
             s.items_migrated);
 
 
--- 7. Update fact_top_errors
+-- 10. Update fact_top_errors
 -- Represents the top 10 unique migration error reasons (based on title) for the latest executions across all batches, partitioned per data type.
 DELETE FROM `{project}.{dataset}.fact_top_errors` WHERE TRUE;
 
