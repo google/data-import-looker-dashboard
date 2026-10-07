@@ -18,6 +18,9 @@ DROP TABLE IF EXISTS `{project}.{dataset}.fact_datatype_metrics`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_wave_metrics`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_user_wave_metrics`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_user_overall_metrics`;
+DROP TABLE IF EXISTS `{project}.{dataset}.fact_file_wave_metrics`;
+DROP TABLE IF EXISTS `{project}.{dataset}.fact_entity_file_wave_metrics`;
+DROP TABLE IF EXISTS `{project}.{dataset}.fact_entity_file_overall_metrics`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_migration_errors`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_migration_timeline`;
 DROP TABLE IF EXISTS `{project}.{dataset}.fact_top_errors`;
@@ -96,6 +99,58 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_user_overall_metrics`(
   migrated_mails_count INT64,
   migrated_calendars_count INT64,
   migrated_contacts_count INT64,
+  total_items INT64,
+  success_rate_percentage FLOAT64,
+  status STRING)
+  CLUSTER BY data_type;
+
+-- fact_file_wave_metrics (Batch-level metrics for OD + SP)
+CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_file_wave_metrics`(
+  data_type STRING,
+  batch_id STRING,
+  batch_name STRING,
+  batch_filter STRING,
+  start_date TIMESTAMP,
+  entity_count INT64,
+  completed_entity_count INT64,
+  successfully_migrated_items INT64,
+  total_migrated_items INT64,
+  migrated_files_count INT64,
+  migrated_folders_count INT64,
+  migrated_document_libraries_count INT64,
+  success_percentage FLOAT64,
+  completion_percentage FLOAT64,
+  avg_items_per_entity FLOAT64,
+  status STRING)
+  CLUSTER BY data_type, batch_id;
+
+-- fact_entity_file_wave_metrics (Entity-level metrics within a batch for OD + SP)
+CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_entity_file_wave_metrics`(
+  data_type STRING,
+  batch_id STRING,
+  batch_name STRING,
+  batch_filter STRING,
+  entity_identifier STRING,
+  total_items_migrated INT64,
+  migrated_files_count INT64,
+  migrated_folders_count INT64,
+  migrated_document_libraries_count INT64,
+  failed_items INT64,
+  crawl_failure_items INT64,
+  total_items INT64,
+  success_rate_percentage FLOAT64,
+  status STRING)
+  CLUSTER BY data_type, batch_id;
+
+-- fact_entity_file_overall_metrics (Lifetime entity metrics across all batches for OD + SP)
+CREATE TABLE IF NOT EXISTS `{project}.{dataset}.fact_entity_file_overall_metrics`(
+  entity_identifier STRING,
+  data_type STRING,
+  batch_filter STRING,
+  total_items_migrated INT64,
+  migrated_files_count INT64,
+  migrated_folders_count INT64,
+  migrated_document_libraries_count INT64,
   total_items INT64,
   success_rate_percentage FLOAT64,
   status STRING)
