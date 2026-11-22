@@ -48,7 +48,7 @@ echo ""
 # Disclaimer and Terms Acknowledgment
 # ----------------------------------------------------------
 cat << 'EOF'
-Project Overview: The Exchange Online Data Import Analytics Dashboard project provides an automated deployment solution for monitoring of large-scale migrations using BigQuery and Looker Studio.
+Project Overview: The Data Import Analytics Dashboard project (Exchange Online, OneDrive and SharePoint) provides an automated deployment solution for monitoring of large-scale migrations using BigQuery and Looker Studio.
 
 Data Accuracy Notice: The dashboard is offered "AS-IS" as an experimental feature and should not be relied on for business outcomes or hard migration timelines. The accuracy of the dashboard may vary and relies on, among other things, a correct BigQuery export setup and the underlying data within the customer's instance. The customer maintains full control over this configuration and data, the dashboard cannot guarantee migration statistics.
 

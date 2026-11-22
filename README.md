@@ -1,4 +1,4 @@
-# Exchange Online Import Reporting Looker Dashboard
+# Data Import Reporting Looker Dashboard (Exchange Online, OneDrive and SharePoint)
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
@@ -20,9 +20,27 @@ This project is licensed under the Apache 2.0 License. See the [LICENSE](LICENSE
 
 ## Introduction
 
-An automated deployment tool to set up a comprehensive Looker Studio monitoring dashboard for your Google Workspace data import runs (specifically Exchange Online migrations). It automates Google Cloud API configuration (including BigQuery Reservation API enablement) and sets up BigQuery schemas and scheduled queries to deliver continuous, up-to-date reporting.
+An automated deployment tool to set up a comprehensive Looker Studio monitoring dashboard for your Google Workspace data import runs from Exchange Online, OneDrive and SharePoint. It automates Google Cloud API configuration (including BigQuery Reservation API enablement) and sets up BigQuery schemas and scheduled queries to deliver continuous, up-to-date reporting.
 
 For details on the metrics tracked by the dashboard, see the [Import Metrics Reference](METRICS.md).
+
+### Data covered
+
+- **Exchange Online:** emails, calendar events and contacts, per user and per batch.
+- **OneDrive and SharePoint:** files and folders, per site (each OneDrive is shown as a site) and per batch.
+- **History:** the first run of the script loads up to 365 days of audit logs. After that, the scheduled query
+  refreshes the last 2 days on every run.
+
+> [!NOTE]
+> OneDrive and SharePoint batches are shown only if their first (Full) run started on or after
+> **21 November 2026** (`OD_SP_CUTOFF` in `script.sh`). Earlier runs don't contain the information needed for
+> accurate reporting. Exchange Online batches are not affected by this date.
+
+### Processed vs Imported
+
+- **Processed** users or sites are those whose migration finished in the latest run, whether completed or failed.
+- **Imported** items are items that were imported successfully.
+- **Processing Status** is `Completed`, `Failed` or `Running`. See [METRICS.md](METRICS.md) for the exact rules.
 
 ---
 
@@ -52,7 +70,16 @@ Before beginning the deployment, ensure your environment meets the following pre
 - **Admin Console BQ Export:** BigQuery export settings must be enabled in the Google Admin Console. Follow the [Google Workspace Setup Guide](https://knowledge.workspace.google.com/admin/reports/set-up-service-log-exports-to-bigquery#before-begin) to get started.
 - **Cloud Shell or SDK:** The `gcloud` CLI and `bq` command-line tool configured for access.
 - **Required Permissions:** Administrative privileges to enable APIs, manage BigQuery tables, and create scheduled queries.
-- **Utility Tools:** `jq` installed in your environment (pre-installed in Cloud Shell).
+- **Utility Tools:** `jq` installed in your environment. It is pre-installed in Cloud Shell. If you run the script
+  anywhere else (for example, on your own Linux or macOS machine), install it first:
+  - Debian or Ubuntu: `sudo apt-get install jq`
+  - macOS (Homebrew): `brew install jq`
+
+  Check that it is installed with `jq --version`.
+
+> [!IMPORTANT]
+> Without `jq`, the script prints a warning and skips the scheduled query. The dashboard then shows only the data
+> loaded by the first run and doesn't refresh. If an older scheduled query exists, it keeps running with the old SQL.
 
 ---
 
@@ -89,6 +116,9 @@ Before beginning the deployment, ensure your environment meets the following pre
 
 If updates or bug fixes are released, you can apply them to your existing deployment by following these steps:
 
-1. Fetch the updated code.Re-run the interactive deployment script (`./script.sh`) in Cloud Shell.
-2. Provide the same configuration inputs (Project ID, Dataset Name, etc.) when prompted. 
+1. Fetch the updated code and re-run the interactive deployment script (`./script.sh`) in Cloud Shell.
+2. Provide the same configuration inputs (Project ID, Dataset Name, etc.) when prompted.
 3. The script will automatically update your BigQuery schemas, tables, and scheduled queries.
+4. If the release adds new dashboard pages (for example, the OneDrive and SharePoint pages), open the new
+   **Magic Link** printed by the script and save a new copy of the dashboard. Existing copies keep working, but they
+   don't get the new pages.
