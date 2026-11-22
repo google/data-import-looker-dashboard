@@ -1275,9 +1275,9 @@ class TestSQLLogicLocal(unittest.TestCase):
              {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': '', 'source_identifier': 'sites/https://tenant.sharepoint.com/:f:/g/sites/Engineering/IgBq6zNVWuZSQJJhQYr8wzDrAenqRTaL6uoT04yI6UkmOds/', 'source_type': 'Sharepoint Site', 'migration_error_code': 'CRAWL_FAILED', 'migration_error_title': 'Site Crawl Failed'}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
 
-            -- Site 1 Complete event
-            ({now_usec - 50000}, 'data_migration', 'USER_MIGRATION_COMPLETE', 'SUCCESS', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
-             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'WaveId: SP-201', 'target_identifier': NULL, 'execution_id': 'sp-exec-1', 'source_name': NULL, 'source_uri': 'https://tenant.sharepoint.com/sites/Marketing', 'source_identifier': 'sites/Marketing', 'source_type': NULL, 'migration_error_code': NULL, 'migration_error_title': NULL}},
+            -- Site 1 Complete event (SharePoint sites send SITE_MIGRATION_COMPLETE with the site URL in source_name)
+            ({now_usec - 50000}, 'data_migration', 'SITE_MIGRATION_COMPLETE', 'MIGRATION', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'sp-exec-1', 'source_name': 'https://tenant.sharepoint.com/sites/Marketing', 'source_uri': NULL, 'source_identifier': 'sites/https://tenant.sharepoint.com/sites/Marketing', 'source_type': 'Sharepoint Site', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
 
@@ -1295,7 +1295,8 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(files_cnt, 1)
         self.assertEqual(fld_cnt, 1)
         self.assertEqual(dl_cnt, 1)
-        self.assertEqual(status, "Running") # Engineering not complete yet
+        # Engineering only has a crawl failure and no completion event yet, so the batch is still running.
+        self.assertEqual(status, "Running")
 
         # 4. Assertions on fact_entity_file_wave_metrics
         entities = self.conn.execute("SELECT entity_identifier, total_items_migrated, migrated_document_libraries_count, crawl_failure_items, status FROM fact_entity_file_wave_metrics WHERE batch_id='SP-201' ORDER BY entity_identifier").fetchall()
@@ -1366,6 +1367,14 @@ class TestSQLLogicLocal(unittest.TestCase):
             -- Subsite 1: DL 2 (/SitePages) -> 1 File
             ({now_usec - 60000}, 'data_migration', 'CREATE_FILE', 'migration', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
              {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': 'https://drive.google.com/...', 'target_identifier': 'files/subf1', 'execution_id': 'sp-sub-exec-1', 'source_name': NULL, 'source_uri': 'https://smh3v.sharepoint.com/sites/Site1/subsite1/SitePages/Home.aspx', 'source_identifier': 'documentLibraries/66db3539-ba37-4c2f-afe3-1d6c26f8dab7/files/c48a9f8e', 'source_type': 'Sharepoint File', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+
+            -- Site completion events for Site1 and subsite1
+            ({now_usec - 50000}, 'data_migration', 'SITE_MIGRATION_COMPLETE', 'MIGRATION', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'sp-sub-exec-1', 'source_name': 'https://smh3v.sharepoint.com/sites/Site1', 'source_uri': NULL, 'source_identifier': 'sites/https://smh3v.sharepoint.com/sites/Site1', 'source_type': 'Sharepoint Site', 'migration_error_code': NULL, 'migration_error_title': NULL}},
+             '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}'),
+            ({now_usec - 40000}, 'data_migration', 'SITE_MIGRATION_COMPLETE', 'MIGRATION', {{'event_status': 'SUCCEEDED', 'error_message': NULL}},
+             {{'migration_type': 'SharePoint Online Enterprise Migration', 'target_uri': NULL, 'target_identifier': NULL, 'execution_id': 'sp-sub-exec-1', 'source_name': 'https://smh3v.sharepoint.com/sites/Site1/subsite1/', 'source_uri': NULL, 'source_identifier': 'sites/https://smh3v.sharepoint.com/sites/Site1/subsite1', 'source_type': 'Sharepoint Site', 'migration_error_code': NULL, 'migration_error_title': NULL}},
              '{now_ts.strftime('%Y-%m-%d %H:%M:%S')}')
         """)
 
@@ -1716,6 +1725,85 @@ class TestSQLLogicLocal(unittest.TestCase):
             "SELECT batch_id, migrated_files_count FROM fact_file_wave_metrics").fetchall(), [('SPINC', 2)])
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT batch_id FROM map_wave_details").fetchall()), ['SPINC'])
+
+    def test_site_completion_event_drives_site_status(self):
+        """Site status follows the completion event: SITE_MIGRATION_COMPLETE (SP) / USER_MIGRATION_COMPLETE (OD)."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        now_usec = int(now.timestamp() * 1_000_000)
+        hour = 3_600 * 1_000_000
+        SP, OD = 'SharePoint Online Enterprise Migration', 'OneDrive Enterprise Migration'
+        r = self._activity_row
+        sp_done, sp_open = 'https://tenant.sharepoint.com/sites/Done/', 'https://tenant.sharepoint.com/sites/Open'
+        od_user = 'https://tenant-my.sharepoint.com/personal/u1'
+
+        def file_row(t, mtype, exec_id, site, n):
+            return r(t, 'CREATE_FILE', mtype, exec_id, source_name=site,
+                     source_identifier=f'documentLibraries/dl-{n}/files/f{n}', source_type='Sharepoint File')
+
+        self._insert_activity([
+            # SharePoint batch: one site finished (event), one site with successes but no event yet.
+            r(now_usec - 10 * hour, 'START_MIGRATION', SP, 'sp-full', 'SPC', 'Full'),
+            file_row(now_usec - 10 * hour + 1, SP, 'sp-full', sp_done, 1),
+            file_row(now_usec - 10 * hour + 2, SP, 'sp-full', sp_open, 2),
+            r(now_usec - 9 * hour, 'SITE_MIGRATION_COMPLETE', SP, 'sp-full', source_name=sp_done,
+              source_identifier='sites/' + sp_done, source_type='Sharepoint Site'),
+            # OneDrive batch: drive finished with the reused USER_MIGRATION_COMPLETE event.
+            r(now_usec - 10 * hour, 'START_MIGRATION', OD, 'od-full', 'ODC', 'Full'),
+            file_row(now_usec - 10 * hour + 1, OD, 'od-full', od_user, 3),
+            r(now_usec - 9 * hour, 'USER_MIGRATION_COMPLETE', OD, 'od-full', source_name=od_user),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        def site_status(batch):
+            return dict(self.conn.execute(
+                f"SELECT entity_identifier, status FROM fact_entity_file_wave_metrics WHERE batch_id='{batch}'").fetchall())
+
+        self.assertEqual(site_status('SPC'), {'tenant.sharepoint.com/sites/Done': 'Completed',
+                                              'tenant.sharepoint.com/sites/Open': 'Running'})
+        self.assertEqual(site_status('ODC'), {'tenant-my.sharepoint.com/personal/u1': 'Completed'})
+        self.assertEqual(self.conn.execute(
+            "SELECT entity_count, completed_entity_count, status FROM fact_file_wave_metrics WHERE batch_id='SPC'"
+        ).fetchone(), (2, 1, 'Running'))
+        self.assertEqual(self.conn.execute(
+            "SELECT completed_entity_count, status FROM fact_file_wave_metrics WHERE batch_id='ODC'").fetchone(),
+            (1, 'Completed'))
+
+        # Second site finishes -> batch completes.
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 8 * hour, 'SITE_MIGRATION_COMPLETE', SP, 'sp-full', source_name=sp_open,
+              source_identifier='sites/' + sp_open, source_type='Sharepoint Site'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(self.conn.execute(
+            "SELECT completed_entity_count, status FROM fact_file_wave_metrics WHERE batch_id='SPC'").fetchone(),
+            (2, 'Completed'))
+
+        # A new delta starts on the SharePoint batch -> the touched site goes back to Running until its event.
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 2 * hour, 'START_MIGRATION', SP, 'sp-delta', 'SPC', 'Delta'),
+            file_row(now_usec - 2 * hour + 1, SP, 'sp-delta', sp_done, 4),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(site_status('SPC')['tenant.sharepoint.com/sites/Done'], 'Running')
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_file_wave_metrics WHERE batch_id='SPC'").fetchone(), ('Running',))
+        # Overall page: Done is not completed in its latest run, so it is Running overall too.
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_entity_file_overall_metrics "
+            "WHERE entity_identifier='tenant.sharepoint.com/sites/Done'").fetchone(), ('Running',))
+
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 1 * hour, 'SITE_MIGRATION_COMPLETE', SP, 'sp-delta', source_name=sp_done,
+              source_identifier='sites/' + sp_done, source_type='Sharepoint Site'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(site_status('SPC')['tenant.sharepoint.com/sites/Done'], 'Completed')
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_file_wave_metrics WHERE batch_id='SPC'").fetchone(), ('Completed',))
 
 if __name__ == "__main__":
     unittest.main()

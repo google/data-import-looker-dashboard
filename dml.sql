@@ -453,6 +453,7 @@ USING (
     WHERE (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
     GROUP BY m.data_type, m.batch_id, user_identifier
   ),
+  -- Per site/user and run: did the completion event arrive.
   UserExecCompletions AS (
     SELECT DISTINCT
       m.batch_id,
@@ -485,7 +486,8 @@ USING (
       ON a.data_migration.migration_type = erm.data_type
       AND m.batch_id = erm.batch_id
       AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
-    WHERE a.event_name = 'USER_MIGRATION_COMPLETE'
+    -- Exchange users and OneDrive drives send USER_MIGRATION_COMPLETE; SharePoint sites send SITE_MIGRATION_COMPLETE.
+    WHERE a.event_name IN ('USER_MIGRATION_COMPLETE', 'SITE_MIGRATION_COMPLETE')
       AND (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
   )
   SELECT 
@@ -1102,7 +1104,8 @@ USING (
       u.batch_id,
       MIN(TIMESTAMP_MICROS(u.start_time_usec)) AS start_date,
       COUNT(DISTINCT u.user_identifier) AS entity_count,
-      COUNTIF(e.entity_status = 'Completed') AS completed_entity_count,
+      -- Processed sites: completion event received for the site's latest run.
+      COUNTIF(u.is_completed) AS completed_entity_count,
       COUNTIF(e.entity_status = 'Failed') AS failed_entity_count,
       SUM(IFNULL(e.migrated_files_count, 0)) AS migrated_files_count,
       SUM(IFNULL(e.migrated_folders_count, 0)) AS migrated_folders_count,
@@ -1216,6 +1219,7 @@ USING (
       u.data_type,
       u.batch_id,
       u.user_identifier AS entity_identifier,
+      u.is_completed,
       ANY_VALUE(m.batch_name) AS batch_name,
       ANY_VALUE(m.batch_filter) AS batch_filter
     FROM `{project}.{dataset}.snapshot_user_wave` u
@@ -1223,7 +1227,7 @@ USING (
       ON u.batch_id = m.batch_id AND u.data_type = m.data_type
     WHERE u.batch_id IN (SELECT batch_id FROM active_batches)
       AND u.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
-    GROUP BY u.data_type, u.batch_id, entity_identifier
+    GROUP BY u.data_type, u.batch_id, entity_identifier, u.is_completed
   ),
   ItemCounts AS (
     SELECT
@@ -1286,7 +1290,8 @@ USING (
       0) AS success_rate_percentage,
     CASE
       WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
-      WHEN IFNULL(i.total_items_migrated, 0) > 0 THEN 'Completed'
+      -- Completed only when the site's completion event was received (same as the DMS site report).
+      WHEN b.is_completed THEN 'Completed'
       ELSE 'Running'
     END AS status
   FROM EntityBase b
@@ -1348,6 +1353,7 @@ USING (
     SELECT
       u.data_type,
       u.user_identifier AS entity_identifier,
+      LOGICAL_AND(u.is_completed) AS is_completed,
       ANY_VALUE(m.batch_filter) AS batch_filter
     FROM `{project}.{dataset}.snapshot_user_wave` u
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
@@ -1429,7 +1435,8 @@ USING (
       0) AS success_rate_percentage,
     CASE
       WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
-      WHEN IFNULL(i.total_items_migrated, 0) > 0 THEN 'Completed'
+      -- Completed only when the site's completion event was received (same as the DMS site report).
+      WHEN b.is_completed THEN 'Completed'
       ELSE 'Running'
     END AS status
   FROM EntityBase b
