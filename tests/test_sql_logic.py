@@ -71,6 +71,8 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # Clean project/dataset prefixes so they execute in the local namespace
         sql_content = sql_content.replace("{project}.{dataset}.", "")
+        # Default: no OneDrive/SharePoint cutoff, unless a test passes its own value.
+        replacements = {"{od_sp_cutoff}": "1970-01-01 00:00:00+00", **(replacements or {})}
         if replacements:
             for k, v in replacements.items():
                 sql_content = sql_content.replace(k, v)
@@ -300,7 +302,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         # 1. Manually populate persistent mapping and snapshot tables for an OLD wave (35 days ago)
         old_time_usec = now_usec - int(timedelta(days=35).total_seconds() * 1_000_000)
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Old', 'Old Wave Batch', 'Old Wave Batch (ID: Wave-Old)', 'exec-old', TRUE);
             
             INSERT INTO map_wave_details VALUES 
@@ -309,7 +311,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             INSERT INTO snapshot_item_user_wave VALUES 
             ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', 'msg-old', 'CREATE_GMAIL_MESSAGE', 'Exchange Online Email Message', 'SUCCEEDED', {old_time_usec}, 'exec-old');
 
-            INSERT INTO snapshot_user_wave VALUES 
+            INSERT INTO snapshot_user_wave (data_type, batch_id, user_identifier, start_time_usec, is_completed, latest_execution_id, latest_execution_time_usec) VALUES 
             ('Exchange Online Migration', 'Wave-Old', 'user-old@example.com', {old_time_usec}, FALSE, 'exec-old', {old_time_usec});
         """)
 
@@ -344,7 +346,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Setup mapping
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Metrics', 'Metrics Batch', 'Metrics (ID: Wave-Metrics)', 'exec-1', TRUE);
         """)
 
@@ -403,7 +405,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Run DML first time with early execution 'exec-early'
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-User', 'User Batch', 'User (ID: Wave-User)', 'exec-early', TRUE);
 
             INSERT INTO activity VALUES 
@@ -425,7 +427,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 2. Run DML second time with a LATER execution 'exec-late' which completes
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-User', 'User Batch', 'User (ID: Wave-User)', 'exec-late', TRUE);
             
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-early';
@@ -454,7 +456,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Setup mapping
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Retry', 'Retry Wave', 'Retry (ID: Wave-Retry)', 'exec-1', FALSE),
             ('Exchange Online Migration', 'Wave-Retry', 'Retry Wave', 'Retry (ID: Wave-Retry)', 'exec-2', TRUE);
         """)
@@ -500,7 +502,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         now_usec = int(now_ts.timestamp() * 1_000_000)
 
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Intra', 'Intra Wave', 'Intra (ID: Wave-Intra)', 'exec-1', TRUE);
         """)
 
@@ -530,7 +532,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         now_usec = int(now_ts.timestamp() * 1_000_000)
 
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Err', 'Err Wave', 'Err (ID: Wave-Err)', 'exec-1', TRUE);
         """)
 
@@ -561,7 +563,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Setup mapping
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Time', 'Time Wave', 'Time (ID: Wave-Time)', 'exec-1', TRUE);
         """)
 
@@ -604,12 +606,12 @@ class TestSQLLogicLocal(unittest.TestCase):
         # - Wave-A: completed (1 succeeded item)
         # - Wave-B: in-progress (1 failed item)
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-A', 'A Batch', 'A (ID: Wave-A)', 'exec-a', TRUE),
             ('Exchange Online Migration', 'Wave-B', 'B Batch', 'B (ID: Wave-B)', 'exec-b', TRUE);
             
             -- Setup old completed wave snapshot
-            INSERT INTO snapshot_user_wave VALUES 
+            INSERT INTO snapshot_user_wave (data_type, batch_id, user_identifier, start_time_usec, is_completed, latest_execution_id, latest_execution_time_usec) VALUES 
             ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', {now_usec - 100}, TRUE, 'exec-a', {now_usec - 100});
             INSERT INTO snapshot_item_user_wave VALUES 
             ('Exchange Online Migration', 'Wave-A', 'u-multi@example.com', 'item-a', 'CREATE_GMAIL_MESSAGE', 'Exchange Online Email Message', 'SUCCEEDED', {now_usec - 100}, 'exec-a');
@@ -669,7 +671,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Wave mapped
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Zero', 'Zero User Batch', 'Zero (ID: Wave-Zero)', 'exec-zero', TRUE);
         """)
 
@@ -702,7 +704,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # Wave mapping
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-EmptyUser', 'Empty User Batch', 'EmptyUser (ID: Wave-EmptyUser)', 'exec-1', TRUE);
         """)
 
@@ -740,10 +742,10 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Setup user as completed in exec-1
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Rollback', 'Rollback Batch', 'Rollback (ID: Wave-Rollback)', 'exec-1', TRUE);
             
-            INSERT INTO snapshot_user_wave VALUES 
+            INSERT INTO snapshot_user_wave (data_type, batch_id, user_identifier, start_time_usec, is_completed, latest_execution_id, latest_execution_time_usec) VALUES 
             ('Exchange Online Migration', 'Wave-Rollback', 'u1@example.com', {now_usec - 10000}, TRUE, 'exec-1', {now_usec - 10000});
         """)
 
@@ -751,7 +753,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.conn.execute(f"""
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
             
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Rollback', 'Rollback Batch', 'Rollback (ID: Wave-Rollback)', 'exec-2', TRUE);
 
             -- Start event for exec-2
@@ -776,7 +778,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Setup mapping for exec-1 (failed execution)
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Clear', 'Clear Wave', 'Clear (ID: Wave-Clear)', 'exec-1', TRUE);
         """)
 
@@ -802,7 +804,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.conn.execute(f"""
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
             
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Clear', 'Clear Wave', 'Clear (ID: Wave-Clear)', 'exec-2', TRUE);
 
             -- Success event for u@example.com in exec-2
@@ -979,10 +981,10 @@ class TestSQLLogicLocal(unittest.TestCase):
         # User 3 (no items/failures): total_items_migrated = 0, failed_items = 0, crawl_failure_items = 0 -> status 'Running'
         # User 4 (completed but failed items): total_items_migrated = 0, failed_items = 1, is_completed = True -> status 'Failed'
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-Fail-Test', 'Fail Test Batch', 'Fail Test', 'exec-fail', TRUE);
             
-            INSERT INTO snapshot_user_wave VALUES 
+            INSERT INTO snapshot_user_wave (data_type, batch_id, user_identifier, start_time_usec, is_completed, latest_execution_id, latest_execution_time_usec) VALUES 
             ('Exchange Online Migration', 'Wave-Fail-Test', 'u1@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
             ('Exchange Online Migration', 'Wave-Fail-Test', 'u2@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
             ('Exchange Online Migration', 'Wave-Fail-Test', 'u3@example.com', {now_usec}, FALSE, 'exec-fail', {now_usec}),
@@ -1040,7 +1042,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # Setup mapping
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-1', 'Wave 1', 'Wave 1 Filter', 'exec-1', TRUE);
         """)
 
@@ -1110,7 +1112,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # 1. Setup execution exec-1 (initial run with failures for u1 and u2)
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-1', TRUE);
         """)
 
@@ -1138,7 +1140,7 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.conn.execute(f"""
             UPDATE map_execution_wave SET is_latest_execution = FALSE WHERE execution_id = 'exec-1';
             
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('Exchange Online Migration', 'Wave-A', 'Wave A', 'Wave A Filter', 'exec-2', TRUE);
 
             -- u1 fails with 500 error in exec-2
@@ -1517,7 +1519,7 @@ class TestSQLLogicLocal(unittest.TestCase):
 
         # Setup mapping
         self.conn.execute(f"""
-            INSERT INTO map_execution_wave VALUES 
+            INSERT INTO map_execution_wave (data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution) VALUES 
             ('SharePoint Online Enterprise Migration', 'Wave-Fail', 'Wave Fail', 'Wave Fail Filter', 'exec-fail', TRUE);
         """)
 
@@ -1553,6 +1555,167 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Verify fact_top_errors contains the failure
         top_err = self.conn.execute("SELECT data_type, migration_error_title, occurrence_count FROM fact_top_errors WHERE migration_error_title='TargetUserExternal'").fetchone()
         self.assertEqual(top_err, ('SharePoint Online Enterprise Migration', 'TargetUserExternal', 2))
+
+    # ------------------------------------------------------------------
+    # OneDrive / SharePoint hard cutoff
+    # ------------------------------------------------------------------
+    def _activity_row(self, time_usec, event_name, migration_type, execution_id, wave_id=None,
+                      execution_type=None, source_name=None, source_identifier=None, source_type=None,
+                      status='SUCCEEDED', error_code=None, error_title=None, event_type='migration'):
+        """Builds one activity row literal for INSERT INTO activity VALUES."""
+        def q(v):
+            return 'NULL' if v is None else "'" + str(v).replace("'", "''") + "'"
+        target_uri = None
+        if wave_id is not None:
+            target_uri = f'WaveId: {wave_id}' + (f', ExecutionType: {execution_type}' if execution_type else '')
+        part = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        return (
+            f"({time_usec}, 'data_migration', {q(event_name)}, {q(event_type)}, "
+            f"{{'event_status': {q(status)}, 'error_message': {q('err' if status == 'FAILED' else None)}}}, "
+            f"{{'migration_type': {q(migration_type)}, 'target_uri': {q(target_uri)}, 'target_identifier': NULL, "
+            f"'execution_id': {q(execution_id)}, 'source_name': {q(source_name)}, 'source_uri': NULL, "
+            f"'source_identifier': {q(source_identifier)}, 'source_type': {q(source_type)}, "
+            f"'migration_error_code': {q(error_code)}, 'migration_error_title': {q(error_title)}}}, '{part}')"
+        )
+
+    def _insert_activity(self, rows):
+        self.conn.execute("INSERT INTO activity VALUES " + ",\n".join(rows))
+
+    def _run_with_cutoff(self, cutoff_dt, lookback_days="500"):
+        self.run_sql_file(self.dml_path, replacements={
+            "{lookback_days}": lookback_days,
+            "{od_sp_cutoff}": cutoff_dt.strftime('%Y-%m-%d %H:%M:%S') + '+00',
+        })
+
+    def test_od_sp_cutoff_hides_batches_started_before_cutoff(self):
+        """Only OD/SP batches whose earliest visible run is a Full run on/after the cutoff are reported."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        day = 86_400 * 1_000_000
+        now_usec = int(now.timestamp() * 1_000_000)
+        cutoff = now - timedelta(days=10)
+        SP, OD, EX = ('SharePoint Online Enterprise Migration', 'OneDrive Enterprise Migration',
+                      'Exchange Online Migration')
+        site = 'https://tenant.sharepoint.com/sites/Site{}/'
+        r = self._activity_row
+        rows = []
+
+        def sp_items(wave, exec_id, t, n, fail=False):
+            out = [
+                r(t, 'CREATE_FILE', SP, exec_id, source_name=site.format(wave),
+                  source_identifier=f'documentLibraries/dl-{wave}/files/f{n}', source_type='Sharepoint File'),
+            ]
+            if fail:
+                out.append(r(t + 1, 'CREATE_FILE', SP, exec_id, source_name=site.format(wave),
+                             source_identifier=f'documentLibraries/dl-{wave}/files/bad{n}',
+                             source_type='Sharepoint File', status='FAILED',
+                             error_code=f'E-{wave}', error_title=f'Error {wave}'))
+            return out
+
+        # Shown: Full after the cutoff.
+        rows += [r(now_usec - 5 * day, 'START_MIGRATION', SP, 'new-full', 'SPNEW', 'Full')]
+        rows += sp_items('SPNEW', 'new-full', now_usec - 5 * day + 10, 1, fail=True)
+        # Shown: after the cutoff, ExecutionType missing (treated as Full).
+        rows += [r(now_usec - 4 * day, 'START_MIGRATION', SP, 'notype-1', 'SPNOTYPE')]
+        rows += sp_items('SPNOTYPE', 'notype-1', now_usec - 4 * day + 10, 1)
+        # Hidden: Full before the cutoff, Delta after it.
+        rows += [r(now_usec - 20 * day, 'START_MIGRATION', SP, 'old-full', 'SPOLD', 'Full')]
+        rows += sp_items('SPOLD', 'old-full', now_usec - 20 * day + 10, 1)
+        rows += [r(now_usec - 2 * day, 'START_MIGRATION', SP, 'old-delta', 'SPOLD', 'Delta')]
+        rows += sp_items('SPOLD', 'old-delta', now_usec - 2 * day + 10, 2, fail=True)
+        # Hidden: run started before the cutoff, item logs after it.
+        rows += [r(now_usec - 15 * day, 'START_MIGRATION', OD, 'od-running', 'ODOLD', 'Full'),
+                 r(now_usec - 1 * day, 'CREATE_FILE', OD, 'od-running',
+                   source_name='https://tenant-my.sharepoint.com/personal/u1',
+                   source_identifier='documentLibraries/dl-od/files/f1', source_type='Sharepoint File')]
+        # Hidden: only a Delta is visible (Full outside the window).
+        rows += [r(now_usec - 3 * day, 'START_MIGRATION', SP, 'delta-only', 'SPDELTA', 'Delta')]
+        rows += sp_items('SPDELTA', 'delta-only', now_usec - 3 * day + 10, 1)
+        # Hidden: only a Retry Failure run is visible.
+        rows += [r(now_usec - 3 * day, 'START_MIGRATION', SP, 'retry-only', 'SPRETRY', 'Retry Failure')]
+        rows += sp_items('SPRETRY', 'retry-only', now_usec - 3 * day + 10, 1)
+        # Shown: Exchange is never cut off.
+        rows += [r(now_usec - 20 * day, 'START_MIGRATION', EX, 'ex-old', 'EXOLD', 'Full'),
+                 r(now_usec - 20 * day + 10, 'CREATE_GMAIL_MESSAGE', EX, 'ex-old', source_name='u@example.com',
+                   source_identifier='msg-1', source_type='Exchange Online Email Message')]
+        self._insert_activity(rows)
+
+        self._run_with_cutoff(cutoff)
+
+        def ids(sql):
+            return sorted({row[0] for row in self.conn.execute(sql).fetchall()})
+
+        # map_execution_wave keeps every run, with run type, start time and the reportable flag.
+        flags = dict(self.conn.execute(
+            "SELECT execution_id, is_reportable FROM map_execution_wave").fetchall())
+        self.assertEqual(flags, {
+            'new-full': True, 'notype-1': True, 'old-full': False, 'old-delta': False,
+            'od-running': False, 'delta-only': False, 'retry-only': False, 'ex-old': True})
+        self.assertEqual(self.conn.execute(
+            "SELECT execution_type, execution_start_usec FROM map_execution_wave WHERE execution_id='old-delta'"
+        ).fetchone(), ('Delta', now_usec - 2 * day))
+
+        # Batch filter source and every reporting table only contain reportable batches.
+        self.assertEqual(ids("SELECT batch_id FROM map_wave_details"), ['EXOLD', 'SPNEW', 'SPNOTYPE'])
+        self.assertEqual(ids("SELECT batch_id FROM fact_file_wave_metrics"), ['SPNEW', 'SPNOTYPE'])
+        self.assertEqual(ids("SELECT batch_id FROM fact_entity_file_wave_metrics"), ['SPNEW', 'SPNOTYPE'])
+        self.assertEqual(ids("SELECT batch_id FROM fact_wave_metrics"), ['EXOLD'])
+        self.assertEqual(ids("SELECT batch_id FROM snapshot_item_user_wave"), ['EXOLD', 'SPNEW', 'SPNOTYPE'])
+        self.assertEqual(ids("SELECT batch_id FROM snapshot_user_wave"), ['EXOLD', 'SPNEW', 'SPNOTYPE'])
+        self.assertEqual(ids("SELECT batch_id FROM fact_migration_errors"), ['SPNEW'])
+        self.assertEqual(ids("SELECT batch_id FROM fact_migration_timeline"), ['EXOLD', 'SPNEW', 'SPNOTYPE'])
+        self.assertEqual(ids("SELECT migration_error_title FROM fact_top_errors"), ['Error SPNEW'])
+        self.assertEqual(ids("SELECT entity_identifier FROM fact_entity_file_overall_metrics"),
+                         ['tenant.sharepoint.com/sites/SiteSPNEW', 'tenant.sharepoint.com/sites/SiteSPNOTYPE'])
+
+        # Counts for the reportable batch are unaffected.
+        self.assertEqual(self.conn.execute(
+            "SELECT migrated_files_count FROM fact_file_wave_metrics WHERE batch_id='SPNEW'").fetchone(), (1,))
+
+    def test_od_sp_cutoff_incremental_runs_keep_decision(self):
+        """A reportable batch stays reportable in later short-window runs, and a hidden one stays hidden."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        day = 86_400 * 1_000_000
+        now_usec = int(now.timestamp() * 1_000_000)
+        cutoff = now - timedelta(days=10)
+        SP = 'SharePoint Online Enterprise Migration'
+        r = self._activity_row
+        site = 'https://tenant.sharepoint.com/sites/Inc/'
+
+        # Backfill: one batch after the cutoff, one before it.
+        self._insert_activity([
+            r(now_usec - 5 * day, 'START_MIGRATION', SP, 'inc-full', 'SPINC', 'Full'),
+            r(now_usec - 5 * day + 10, 'CREATE_FILE', SP, 'inc-full', source_name=site,
+              source_identifier='documentLibraries/dl1/files/f1', source_type='Sharepoint File'),
+            r(now_usec - 30 * day, 'START_MIGRATION', SP, 'pre-full', 'SPPRE', 'Full'),
+        ])
+        self._run_with_cutoff(cutoff, lookback_days="500")
+
+        # Later scheduled run: only new logs (the old START events are outside the 2-day window).
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 3_600_000_000, 'START_MIGRATION', SP, 'inc-delta', 'SPINC', 'Delta'),
+            r(now_usec - 3_600_000_000 + 10, 'CREATE_FILE', SP, 'inc-delta', source_name=site,
+              source_identifier='documentLibraries/dl1/files/f2', source_type='Sharepoint File'),
+            r(now_usec - 3_600_000_000, 'START_MIGRATION', SP, 'pre-delta', 'SPPRE', 'Delta'),
+            r(now_usec - 3_600_000_000 + 10, 'CREATE_FILE', SP, 'pre-delta',
+              source_name='https://tenant.sharepoint.com/sites/Pre/',
+              source_identifier='documentLibraries/dl9/files/f1', source_type='Sharepoint File'),
+        ])
+        self._run_with_cutoff(cutoff, lookback_days="2")
+
+        # Stored run details from the backfill are kept.
+        self.assertEqual(self.conn.execute(
+            "SELECT execution_type, execution_start_usec, is_reportable FROM map_execution_wave "
+            "WHERE execution_id='inc-full'").fetchone(), ('Full', now_usec - 5 * day, True))
+        self.assertEqual(self.conn.execute(
+            "SELECT is_reportable FROM map_execution_wave WHERE execution_id='pre-delta'").fetchone(), (False,))
+
+        self.assertEqual(self.conn.execute(
+            "SELECT batch_id, migrated_files_count FROM fact_file_wave_metrics").fetchall(), [('SPINC', 2)])
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT batch_id FROM map_wave_details").fetchall()), ['SPINC'])
 
 if __name__ == "__main__":
     unittest.main()
