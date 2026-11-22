@@ -212,7 +212,8 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.snapshot_user_wave`(
   start_time_usec INT64,
   is_completed BOOLEAN,
   latest_execution_id STRING,
-  latest_execution_time_usec INT64)
+  latest_execution_time_usec INT64,
+  is_container_failed BOOLEAN DEFAULT FALSE)
   CLUSTER BY data_type, batch_id;
 
 -- Persistent snapshot for unique migration error events
