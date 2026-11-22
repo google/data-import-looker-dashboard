@@ -350,7 +350,17 @@ WITH BaseItems AS (
       ),
       a.data_migration.source_identifier
     ) AS user_identifier,
-    a.data_migration.source_identifier,
+    -- File versions: every version of a file is logged with ".../files/<id>/versions/<n>". Group them under the
+    -- file's own ID so one file is one item (older versions also log their own CREATE_FILE row).
+    CASE
+      WHEN a.event_name IN ('CREATE_FILE', 'CREATE_FILE_VERSION')
+        THEN REGEXP_REPLACE(a.data_migration.source_identifier, r'/versions/[^/]+$', '')
+      -- Crawl (discovery) failures can share the ID of the item that caused them (e.g. a failed folder and the
+      -- "cannot migrate child items" crawl failure for it). Keep them as separate entries so neither hides the other.
+      WHEN a.event_name = 'CRAWL_FAILURE' AND IFNULL(a.data_migration.source_identifier, '') != ''
+        THEN CONCAT('crawl|', a.data_migration.source_identifier)
+      ELSE a.data_migration.source_identifier
+    END AS source_identifier,
     a.event_name,
     a.data_migration.source_type AS source_type,
     a.status.event_status,
@@ -375,6 +385,9 @@ WITH BaseItems AS (
       )
       OR a.status.event_status = 'FAILED'
     )
+    -- A successful (or skipped) version upload does not mean the file was created, so only failed version rows
+    -- are kept. Otherwise a version success could win over a failed CREATE_FILE for the same file.
+    AND NOT (a.event_name = 'CREATE_FILE_VERSION' AND IFNULL(a.status.event_status, '') != 'FAILED')
 ),
 RankedItems AS (
   SELECT
@@ -1534,6 +1547,10 @@ USING (
       LOWER(a.event_type) = 'migration'
       AND LOWER(a.status.event_status) IN ('succeeded', 'succeeded_with_warnings')
       AND a.event_name IN ('CREATE_FILE', 'CREATE_FOLDER', 'CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
+      -- Older file versions log their own CREATE_FILE row (".../versions/<n>"); they are not new items.
+      AND NOT (a.event_name = 'CREATE_FILE' AND IFNULL(a.data_migration.source_identifier, '') LIKE '%/versions/%')
+      -- SharePoint site containers (the site's top folder in Drive) are not customer items.
+      AND NOT (a.event_name = 'CREATE_FOLDER' AND IFNULL(a.data_migration.source_type, '') = 'Sharepoint Site')
       AND DATE(TIMESTAMP_MICROS(a.time_usec)) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 YEAR)
   )
   SELECT
