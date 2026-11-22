@@ -72,6 +72,10 @@ WITH
       data_migration.migration_type AS data_type,
       REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)') AS wave_id,
       data_migration.execution_id AS execution_id,
+      -- Run type and start time, used by the OneDrive/SharePoint cutoff below.
+      -- target_uri looks like "WaveId: <id>, ExecutionType: Full | Delta | Retry Failure | Go Live".
+      NULLIF(TRIM(REGEXP_EXTRACT(data_migration.target_uri, r'ExecutionType: ([^,]+)')), '') AS execution_type,
+      MIN(time_usec) OVER (PARTITION BY data_migration.execution_id) AS execution_start_usec,
       ROW_NUMBER()
         OVER (
           PARTITION BY REGEXP_EXTRACT(data_migration.target_uri, r'WaveId: ([\w-]+)')
@@ -87,17 +91,29 @@ WITH
       batch_id AS wave_id,
       batch_name
     FROM `{project}.{dataset}.map_wave_details`
+  ),
+  -- Fallback for batches hidden by the cutoff, which are not kept in map_wave_details.
+  HistoricalExecutionNames AS (
+    SELECT
+      batch_id AS wave_id,
+      ANY_VALUE(batch_name) AS batch_name
+    FROM `{project}.{dataset}.map_execution_wave`
+    WHERE batch_name IS NOT NULL AND batch_name != 'Default Migration Batch'
+    GROUP BY batch_id
   )
 SELECT
   e.data_type,
   e.wave_id AS batch_id,
-  COALESCE(s.batch_name, h.batch_name, 'Default Migration Batch') AS batch_name,
-  CONCAT(COALESCE(s.batch_name, h.batch_name, 'Default Migration Batch'), " (ID: ", CAST(e.wave_id AS STRING), ")") AS batch_filter,
+  COALESCE(s.batch_name, h.batch_name, he.batch_name, 'Default Migration Batch') AS batch_name,
+  CONCAT(COALESCE(s.batch_name, h.batch_name, he.batch_name, 'Default Migration Batch'), " (ID: ", CAST(e.wave_id AS STRING), ")") AS batch_filter,
   e.execution_id,
-  e.is_latest_execution
+  e.is_latest_execution,
+  e.execution_type,
+  e.execution_start_usec
 FROM StartEvents e
 LEFT JOIN latest_wave_names s ON e.wave_id = s.wave_id
-LEFT JOIN HistoricalDetails h ON e.wave_id = h.wave_id;
+LEFT JOIN HistoricalDetails h ON e.wave_id = h.wave_id
+LEFT JOIN HistoricalExecutionNames he ON e.wave_id = he.wave_id;
 
 -- Step 4: Execute Sequenced MERGE Operations (Mapping Tables)
 
@@ -115,17 +131,22 @@ SET
   t.batch_id = s.batch_id,
   t.batch_name = s.batch_name,
   t.batch_filter = s.batch_filter,
-  t.is_latest_execution = s.is_latest_execution
+  t.is_latest_execution = s.is_latest_execution,
+  -- Never overwrite a known run type / start time with NULL.
+  t.execution_type = COALESCE(s.execution_type, t.execution_type),
+  t.execution_start_usec = COALESCE(LEAST(s.execution_start_usec, t.execution_start_usec), s.execution_start_usec, t.execution_start_usec)
     WHEN NOT MATCHED
       THEN
-        INSERT(data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution)
+        INSERT(data_type, batch_id, batch_name, batch_filter, execution_id, is_latest_execution, execution_type, execution_start_usec)
           VALUES(
             s.data_type,
             s.batch_id,
             s.batch_name,
             s.batch_filter,
             s.execution_id,
-            s.is_latest_execution);
+            s.is_latest_execution,
+            s.execution_type,
+            s.execution_start_usec);
 
 -- Ensure older historical executions are marked as inactive if a newer execution was processed today
 UPDATE `{project}.{dataset}.map_execution_wave` t
@@ -146,8 +167,42 @@ SET
 FROM latest_wave_names s
 WHERE t.batch_id = s.wave_id;
 
+-- OneDrive / SharePoint hard cutoff
+-- A OneDrive or SharePoint batch is reportable only if its earliest visible run is a Full run that started on or
+-- after the cutoff ({od_sp_cutoff}). Runs before the cutoff lack the site URL, OneDrive type and site completion
+-- audit-log fields. Exchange batches are always reportable. The decision is recomputed from the persistent
+-- map_execution_wave table on every run, because scheduled runs only read a short lookback window.
+UPDATE `{project}.{dataset}.map_execution_wave`
+SET is_reportable = TRUE
+WHERE TRUE;
+
+UPDATE `{project}.{dataset}.map_execution_wave` t
+SET is_reportable = (
+  f.first_start_usec >= UNIX_MICROS(TIMESTAMP('{od_sp_cutoff}'))
+  -- A missing ExecutionType (unexpected log format) is treated as Full so batches are not hidden by mistake.
+  AND IFNULL(f.first_execution_type, 'Full') = 'Full'
+)
+FROM (
+  SELECT
+    batch_id AS cutoff_batch_id,
+    execution_start_usec AS first_start_usec,
+    execution_type AS first_execution_type
+  FROM `{project}.{dataset}.map_execution_wave`
+  WHERE execution_start_usec IS NOT NULL
+    AND data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
+  QUALIFY ROW_NUMBER() OVER (PARTITION BY batch_id ORDER BY execution_start_usec ASC) = 1
+) f
+WHERE t.batch_id = f.cutoff_batch_id
+  AND t.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration');
+
 -- 2. Merge map_wave_details
 -- Represents the persistent registry of all unique migration batches, maintaining their latest friendly names and filter labels.
+-- Only reportable batches are kept, because this table feeds the batch filter of the report.
+DELETE FROM `{project}.{dataset}.map_wave_details`
+WHERE batch_id IN (
+  SELECT batch_id FROM `{project}.{dataset}.map_execution_wave` WHERE is_reportable = FALSE
+);
+
 MERGE `{project}.{dataset}.map_wave_details` t
 USING (
   SELECT DISTINCT
@@ -157,6 +212,7 @@ USING (
     batch_filter
   FROM
     `{project}.{dataset}.map_execution_wave`
+  WHERE IFNULL(is_reportable, TRUE)
 ) s
 ON t.data_type = s.data_type AND t.batch_id = s.batch_id WHEN MATCHED THEN UPDATE
 SET
@@ -202,6 +258,7 @@ SELECT
 FROM incremental_logs a
 JOIN `{project}.{dataset}.map_execution_wave` m
   ON a.data_migration.execution_id = m.execution_id
+  AND IFNULL(m.is_reportable, TRUE)
 WHERE a.data_migration.source_identifier LIKE 'documentLibraries/%'
 GROUP BY m.batch_id, a.data_migration.migration_type, REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)');
 
@@ -255,6 +312,7 @@ SELECT DISTINCT
 FROM incremental_logs a
 JOIN `{project}.{dataset}.map_execution_wave` m
   ON a.data_migration.execution_id = m.execution_id
+  AND IFNULL(m.is_reportable, TRUE)
 LEFT JOIN entity_resolution_map erm
   ON a.data_migration.migration_type = erm.data_type
   AND m.batch_id = erm.batch_id
@@ -302,6 +360,7 @@ WITH BaseItems AS (
   FROM incremental_logs a
   JOIN `{project}.{dataset}.map_execution_wave` m
     ON a.data_migration.execution_id = m.execution_id
+    AND IFNULL(m.is_reportable, TRUE)
   LEFT JOIN entity_resolution_map erm
     ON a.data_migration.migration_type = erm.data_type
     AND m.batch_id = erm.batch_id
@@ -386,7 +445,7 @@ USING (
       ARRAY_AGG(a.data_migration.execution_id ORDER BY a.time_usec DESC)[OFFSET(0)] AS latest_execution_id,
       MAX(a.time_usec) AS latest_execution_time_usec
     FROM incremental_logs a
-    JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
+    JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id AND IFNULL(m.is_reportable, TRUE)
     LEFT JOIN entity_resolution_map erm
       ON a.data_migration.migration_type = erm.data_type
       AND m.batch_id = erm.batch_id
@@ -421,7 +480,7 @@ USING (
       a.data_migration.execution_id,
       TRUE AS is_completed
     FROM incremental_logs a
-    JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id
+    JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id AND IFNULL(m.is_reportable, TRUE)
     LEFT JOIN entity_resolution_map erm
       ON a.data_migration.migration_type = erm.data_type
       AND m.batch_id = erm.batch_id
@@ -488,6 +547,7 @@ USING (
   FROM incremental_logs a
   JOIN `{project}.{dataset}.map_execution_wave` m
     ON a.data_migration.execution_id = m.execution_id
+    AND IFNULL(m.is_reportable, TRUE)
   LEFT JOIN entity_resolution_map erm
     ON a.data_migration.migration_type = erm.data_type
     AND m.batch_id = erm.batch_id
@@ -604,6 +664,7 @@ USING (
       batch_filter
     FROM `{project}.{dataset}.map_execution_wave`
     WHERE batch_id IN (SELECT batch_id FROM active_batches)
+      AND IFNULL(is_reportable, TRUE)
       AND data_type = 'Exchange Online Migration'
   ),
   ItemAggs AS (
@@ -868,6 +929,7 @@ USING (
     FROM `{project}.{dataset}.snapshot_user_wave` u
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
       ON u.data_type = m.data_type
+      AND IFNULL(m.is_reportable, TRUE)
     WHERE u.data_type IN (SELECT data_type FROM active_datatypes)
       AND u.data_type = 'Exchange Online Migration'
     GROUP BY u.data_type, u.user_identifier
@@ -1062,6 +1124,7 @@ USING (
       batch_filter
     FROM `{project}.{dataset}.map_execution_wave`
     WHERE batch_id IN (SELECT batch_id FROM active_batches)
+      AND IFNULL(is_reportable, TRUE)
       AND data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
   )
   SELECT
@@ -1289,6 +1352,7 @@ USING (
     FROM `{project}.{dataset}.snapshot_user_wave` u
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
       ON u.data_type = m.data_type
+      AND IFNULL(m.is_reportable, TRUE)
     WHERE u.data_type IN (SELECT data_type FROM active_datatypes)
       AND u.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
     GROUP BY u.data_type, entity_identifier
@@ -1458,6 +1522,7 @@ USING (
     JOIN
       `{project}.{dataset}.map_execution_wave` m
       ON a.data_migration.execution_id = m.execution_id
+      AND IFNULL(m.is_reportable, TRUE)
     WHERE
       LOWER(a.event_type) = 'migration'
       AND LOWER(a.status.event_status) IN ('succeeded', 'succeeded_with_warnings')

@@ -34,7 +34,10 @@ CREATE TABLE IF NOT EXISTS `{project}.{dataset}.map_execution_wave`(
   batch_name STRING,
   batch_filter STRING,
   execution_id STRING,
-  is_latest_execution BOOLEAN)
+  is_latest_execution BOOLEAN,
+  execution_type STRING,
+  execution_start_usec INT64,
+  is_reportable BOOLEAN DEFAULT TRUE)
   CLUSTER BY data_type;
 
 -- Unique wave details

@@ -131,16 +131,23 @@ DDL_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
                  -e "s/{dataset}/${DMS_DATASET}/g" \
                  ddl.sql)
 
+# OneDrive / SharePoint cutoff: only OneDrive and SharePoint batches whose first (Full) run started on or after
+# this time are reported. Set it to a few days after the last backend audit-log change is live in all regions.
+# Changing it later requires re-running this script (tables are rebuilt).
+OD_SP_CUTOFF="2026-11-21 00:00:00+00"
+
 # Process DML Backfill (uses 365 days)
 DML_BACKFILL_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
                  -e "s/{dataset}/${DMS_DATASET}/g" \
                  -e "s/{lookback_days}/365/g" \
+                 -e "s/{od_sp_cutoff}/${OD_SP_CUTOFF}/g" \
                  dml.sql)
 
 # Process DML Scheduled (uses 2 days)
 DML_SCHEDULED_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
                  -e "s/{dataset}/${DMS_DATASET}/g" \
                  -e "s/{lookback_days}/2/g" \
+                 -e "s/{od_sp_cutoff}/${OD_SP_CUTOFF}/g" \
                  dml.sql)
 
 # ----------------------------------------------------------
