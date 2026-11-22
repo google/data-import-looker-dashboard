@@ -1307,7 +1307,8 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(entities[0][1], 0) # 0 migrated
         self.assertEqual(entities[0][2], 0) # 0 DLs
         self.assertEqual(entities[0][3], 1) # 1 crawl failure
-        self.assertEqual(entities[0][4], "Failed") # 0 items + 1 crawl failure -> Failed
+        # Only a crawl failure, no completion event and no failed site container -> still Running (as in the DMS report).
+        self.assertEqual(entities[0][4], "Running")
         
         # Marketing site
         self.assertEqual(entities[1][0], "tenant.sharepoint.com/sites/Marketing")
@@ -1554,12 +1555,13 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Verify fact_entity_file_wave_metrics has the clean URLs
         entities = self.conn.execute("SELECT entity_identifier, crawl_failure_items, status FROM fact_entity_file_wave_metrics ORDER BY entity_identifier").fetchall()
         self.assertEqual(len(entities), 2)
+        # No site container row and a document-library-level discovery failure -> Failed (DMS report rule).
         self.assertEqual(entities[0], ('smh3v-my.sharepoint.com/personal/bugbash1_smh3v_onmicrosoft_com', 1, 'Failed'))
         self.assertEqual(entities[1], ('smh3v-my.sharepoint.com/personal/bugbash2_smh3v_onmicrosoft_com', 1, 'Failed'))
 
-        # Verify batch status is Failed
+        # Verify batch status: every drive failed (failed drives count as processed)
         wave_status = self.conn.execute("SELECT status, entity_count, completed_entity_count FROM fact_file_wave_metrics WHERE batch_id='Wave-Fail'").fetchone()
-        self.assertEqual(wave_status, ('Failed', 2, 0))
+        self.assertEqual(wave_status, ('Failed', 2, 2))
 
         # Verify fact_top_errors contains the failure
         top_err = self.conn.execute("SELECT data_type, migration_error_title, occurrence_count FROM fact_top_errors WHERE migration_error_title='TargetUserExternal'").fetchone()
@@ -1680,51 +1682,6 @@ class TestSQLLogicLocal(unittest.TestCase):
         # Counts for the reportable batch are unaffected.
         self.assertEqual(self.conn.execute(
             "SELECT migrated_files_count FROM fact_file_wave_metrics WHERE batch_id='SPNEW'").fetchone(), (1,))
-
-    def test_od_sp_cutoff_incremental_runs_keep_decision(self):
-        """A reportable batch stays reportable in later short-window runs, and a hidden one stays hidden."""
-        self.run_sql_file(self.ddl_path)
-        now = datetime.utcnow()
-        day = 86_400 * 1_000_000
-        now_usec = int(now.timestamp() * 1_000_000)
-        cutoff = now - timedelta(days=10)
-        SP = 'SharePoint Online Enterprise Migration'
-        r = self._activity_row
-        site = 'https://tenant.sharepoint.com/sites/Inc/'
-
-        # Backfill: one batch after the cutoff, one before it.
-        self._insert_activity([
-            r(now_usec - 5 * day, 'START_MIGRATION', SP, 'inc-full', 'SPINC', 'Full'),
-            r(now_usec - 5 * day + 10, 'CREATE_FILE', SP, 'inc-full', source_name=site,
-              source_identifier='documentLibraries/dl1/files/f1', source_type='Sharepoint File'),
-            r(now_usec - 30 * day, 'START_MIGRATION', SP, 'pre-full', 'SPPRE', 'Full'),
-        ])
-        self._run_with_cutoff(cutoff, lookback_days="500")
-
-        # Later scheduled run: only new logs (the old START events are outside the 2-day window).
-        self.conn.execute("DELETE FROM activity")
-        self._insert_activity([
-            r(now_usec - 3_600_000_000, 'START_MIGRATION', SP, 'inc-delta', 'SPINC', 'Delta'),
-            r(now_usec - 3_600_000_000 + 10, 'CREATE_FILE', SP, 'inc-delta', source_name=site,
-              source_identifier='documentLibraries/dl1/files/f2', source_type='Sharepoint File'),
-            r(now_usec - 3_600_000_000, 'START_MIGRATION', SP, 'pre-delta', 'SPPRE', 'Delta'),
-            r(now_usec - 3_600_000_000 + 10, 'CREATE_FILE', SP, 'pre-delta',
-              source_name='https://tenant.sharepoint.com/sites/Pre/',
-              source_identifier='documentLibraries/dl9/files/f1', source_type='Sharepoint File'),
-        ])
-        self._run_with_cutoff(cutoff, lookback_days="2")
-
-        # Stored run details from the backfill are kept.
-        self.assertEqual(self.conn.execute(
-            "SELECT execution_type, execution_start_usec, is_reportable FROM map_execution_wave "
-            "WHERE execution_id='inc-full'").fetchone(), ('Full', now_usec - 5 * day, True))
-        self.assertEqual(self.conn.execute(
-            "SELECT is_reportable FROM map_execution_wave WHERE execution_id='pre-delta'").fetchone(), (False,))
-
-        self.assertEqual(self.conn.execute(
-            "SELECT batch_id, migrated_files_count FROM fact_file_wave_metrics").fetchall(), [('SPINC', 2)])
-        self.assertEqual(sorted(r[0] for r in self.conn.execute(
-            "SELECT batch_id FROM map_wave_details").fetchall()), ['SPINC'])
 
     def test_site_completion_event_drives_site_status(self):
         """Site status follows the completion event: SITE_MIGRATION_COMPLETE (SP) / USER_MIGRATION_COMPLETE (OD)."""
@@ -1869,6 +1826,87 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT SUM(items_migrated) FROM fact_migration_timeline WHERE batch_id='SPVER'").fetchone(), (3,))
 
+    def test_failed_site_container_marks_site_failed(self):
+        """A failed site container marks the site Failed (even after completion) and is not a failed item."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        now_usec = int(now.timestamp() * 1_000_000)
+        hour = 3_600 * 1_000_000
+        SP = 'SharePoint Online Enterprise Migration'
+        r = self._activity_row
+        bad, ok, only = ('https://tenant.sharepoint.com/sites/Bad/', 'https://tenant.sharepoint.com/sites/Ok/',
+                         'https://tenant.sharepoint.com/sites/Only/')
+
+        def container(t, exec_id, site, status):
+            return r(t, 'CREATE_FOLDER', SP, exec_id, source_name=site, source_identifier='sites/' + site,
+                     source_type='Sharepoint Site', status=status,
+                     error_code='T010' if status == 'FAILED' else None, error_title='Err' if status == 'FAILED' else None)
+
+        def file_row(t, exec_id, site, n):
+            return r(t, 'CREATE_FILE', SP, exec_id, source_name=site,
+                     source_identifier=f'documentLibraries/dl{n}/files/f{n}', source_type='Sharepoint File')
+
+        def done(t, exec_id, site):
+            return r(t, 'SITE_MIGRATION_COMPLETE', SP, exec_id, source_name=site,
+                     source_identifier='sites/' + site, source_type='Sharepoint Site')
+
+        self._insert_activity([
+            r(now_usec - 10 * hour, 'START_MIGRATION', SP, 'c-full', 'SPCON', 'Full'),
+            # Bad: container failed, files still succeed, then the completion event arrives.
+            container(now_usec - 10 * hour + 1, 'c-full', bad, 'FAILED'),
+            file_row(now_usec - 10 * hour + 2, 'c-full', bad, 1),
+            file_row(now_usec - 10 * hour + 3, 'c-full', bad, 2),
+            done(now_usec - 9 * hour, 'c-full', bad),
+            # Ok: container fine, completion event.
+            container(now_usec - 10 * hour + 4, 'c-full', ok, 'SUCCEEDED'),
+            file_row(now_usec - 10 * hour + 5, 'c-full', ok, 3),
+            done(now_usec - 9 * hour, 'c-full', ok),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        sites = {row[0]: row[1:] for row in self.conn.execute(
+            "SELECT entity_identifier, migrated_files_count, failed_items, status FROM fact_entity_file_wave_metrics "
+            "WHERE batch_id='SPCON'").fetchall()}
+        self.assertEqual(sites['tenant.sharepoint.com/sites/Bad'], (2, 0, 'Failed'))   # files counted, not a failed item
+        self.assertEqual(sites['tenant.sharepoint.com/sites/Ok'], (1, 0, 'Completed'))
+        # Both sites processed -> batch Completed; Bad still shows Failed.
+        self.assertEqual(self.conn.execute(
+            "SELECT entity_count, completed_entity_count, status FROM fact_file_wave_metrics WHERE batch_id='SPCON'"
+        ).fetchone(), (2, 2, 'Completed'))
+        # Overall page and container error still visible in the errors table.
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_entity_file_overall_metrics WHERE entity_identifier='tenant.sharepoint.com/sites/Bad'"
+        ).fetchone(), ('Failed',))
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM fact_migration_errors WHERE batch_id='SPCON' AND migration_error_code='T010'"
+        ).fetchone(), (1,))
+
+        # Delta: Bad's container succeeds this time -> no longer Failed (Running until its completion event).
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 2 * hour, 'START_MIGRATION', SP, 'c-delta', 'SPCON', 'Delta'),
+            container(now_usec - 2 * hour + 1, 'c-delta', bad, 'SUCCEEDED'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_entity_file_wave_metrics WHERE batch_id='SPCON' "
+            "AND entity_identifier='tenant.sharepoint.com/sites/Bad'").fetchone(), ('Running',))
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_file_wave_metrics WHERE batch_id='SPCON'").fetchone(), ('Running',))
+
+        # A batch whose only site has just a failed container -> site Failed, batch Failed.
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 1 * hour, 'START_MIGRATION', SP, 'only-full', 'SPONLY', 'Full'),
+            container(now_usec - 1 * hour + 1, 'only-full', only, 'FAILED'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(self.conn.execute(
+            "SELECT failed_items, status FROM fact_entity_file_wave_metrics WHERE batch_id='SPONLY'").fetchone(),
+            (0, 'Failed'))
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_file_wave_metrics WHERE batch_id='SPONLY'").fetchone(), ('Failed',))
+
     def test_crawl_failure_does_not_hide_failed_item_with_same_id(self):
         """A failed folder and the crawl failure for its children (same ID) are both counted, as in the site report."""
         self.run_sql_file(self.ddl_path)
@@ -1895,6 +1933,128 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT successfully_migrated_items, total_migrated_items FROM fact_file_wave_metrics "
             "WHERE batch_id='SPCRAWL'").fetchone(), (1, 2))
+
+    def test_site_failure_rules_permission_resolver_and_library_only(self):
+        """Site Failed: permission resolver failure; library-only mapping with a library-level discovery failure."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        now_usec = int(now.timestamp() * 1_000_000)
+        SP = 'SharePoint Online Enterprise Migration'
+        r = self._activity_row
+        lib_site, perm_site, dl_site, mix_site = ('https://t.sharepoint.com/sites/Lib', 'https://t.sharepoint.com/sites/Perm/',
+                                                  'https://t.sharepoint.com/sites/Dl', 'https://t.sharepoint.com/sites/Mix')
+
+        def crawl(t, exec_id, site, stype, sid, code='C002'):
+            return r(t, 'CRAWL_FAILURE', SP, exec_id, source_name=site, source_identifier=sid, source_type=stype,
+                     status='FAILED', error_code=code, error_title='Err')
+
+        def done(t, exec_id, site):
+            return r(t, 'SITE_MIGRATION_COMPLETE', SP, exec_id, source_name=site,
+                     source_identifier='sites/' + site, source_type='Sharepoint Site')
+
+        def file_row(t, exec_id, site, sid):
+            return r(t, 'CREATE_FILE', SP, exec_id, source_name=site, source_identifier=sid, source_type='Sharepoint File')
+
+        self._insert_activity([
+            # Run 1 pattern: library-only, library discovery failed (Phase 1), no completion event.
+            r(now_usec - 9_000, 'START_MIGRATION', SP, 'lib', 'B-LIB', 'Full'),
+            crawl(now_usec - 8_000, 'lib', lib_site, 'Sharepoint Document Library Crawler Phase 1',
+                  lib_site + '/amrJobs/scopes/DL1'),
+            # Run 2 pattern: site mapping, permission resolver + site crawler failed, completion event.
+            r(now_usec - 9_000, 'START_MIGRATION', SP, 'perm', 'B-PERM', 'Full'),
+            crawl(now_usec - 8_000, 'perm', perm_site, 'Sharepoint Site Permission Resolver', 'sites/' + perm_site),
+            crawl(now_usec - 8_000, 'perm', perm_site, 'Sharepoint Site Crawler', 'sites/' + perm_site, code=None),
+            done(now_usec - 7_000, 'perm', perm_site),
+            # Run 3 pattern: library-only, a folder-level item crawler failure only -> not a library failure.
+            r(now_usec - 9_000, 'START_MIGRATION', SP, 'dl', 'B-DL', 'Full'),
+            file_row(now_usec - 8_500, 'dl', dl_site, 'documentLibraries/d1/files/f1'),
+            crawl(now_usec - 8_000, 'dl', dl_site, 'Sharepoint Item Crawler', 'documentLibraries/d1/folders/x', code='P009'),
+            done(now_usec - 7_000, 'dl', dl_site),
+            # Site mapping (container OK) with a library-level failure -> NOT Failed (report: completed with warnings).
+            r(now_usec - 9_000, 'START_MIGRATION', SP, 'mix', 'B-MIX', 'Full'),
+            r(now_usec - 8_900, 'CREATE_FOLDER', SP, 'mix', source_name=mix_site, source_identifier='sites/' + mix_site,
+              source_type='Sharepoint Site'),
+            file_row(now_usec - 8_500, 'mix', mix_site, 'documentLibraries/m1/files/f1'),
+            crawl(now_usec - 8_000, 'mix', mix_site, 'Sharepoint Document Library Crawler Phase 2', mix_site + '/amrJobs/m2'),
+            done(now_usec - 7_000, 'mix', mix_site),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        status = dict(self.conn.execute(
+            "SELECT batch_id, status FROM fact_entity_file_wave_metrics").fetchall())
+        self.assertEqual(status, {'B-LIB': 'Failed', 'B-PERM': 'Failed', 'B-DL': 'Completed', 'B-MIX': 'Completed'})
+        batches = dict(self.conn.execute("SELECT batch_id, status FROM fact_file_wave_metrics").fetchall())
+        self.assertEqual(batches, {'B-LIB': 'Failed', 'B-PERM': 'Failed', 'B-DL': 'Completed', 'B-MIX': 'Completed'})
+
+    def test_batch_completes_with_failed_site_without_completion_event(self):
+        """A library-only site that failed (no completion event) + a completed site -> batch Completed, 2/2 processed."""
+        self.run_sql_file(self.ddl_path)
+        now_usec = int(datetime.utcnow().timestamp() * 1_000_000)
+        SP = 'SharePoint Online Enterprise Migration'
+        r = self._activity_row
+        bad, ok = 'https://t.sharepoint.com/sites/BadLib', 'https://t.sharepoint.com/sites/OkLib'
+        self._insert_activity([
+            r(now_usec - 9_000, 'START_MIGRATION', SP, 'mixed', 'B-MIXED', 'Full'),
+            r(now_usec - 8_000, 'CRAWL_FAILURE', SP, 'mixed', source_name=bad,
+              source_identifier=bad + '/amrJobs/scopes/DL1', source_type='Sharepoint Document Library Crawler Phase 1',
+              status='FAILED', error_code='C002', error_title='TargetUserExternal'),
+            r(now_usec - 8_000, 'CREATE_FILE', SP, 'mixed', source_name=ok,
+              source_identifier='documentLibraries/ok/files/f1', source_type='Sharepoint File'),
+            r(now_usec - 7_000, 'SITE_MIGRATION_COMPLETE', SP, 'mixed', source_name=ok,
+              source_identifier='sites/' + ok, source_type='Sharepoint Site'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(dict(self.conn.execute(
+            "SELECT entity_identifier, status FROM fact_entity_file_wave_metrics WHERE batch_id='B-MIXED'").fetchall()),
+            {'t.sharepoint.com/sites/BadLib': 'Failed', 't.sharepoint.com/sites/OkLib': 'Completed'})
+        self.assertEqual(self.conn.execute(
+            "SELECT entity_count, completed_entity_count, completion_percentage, status FROM fact_file_wave_metrics "
+            "WHERE batch_id='B-MIXED'").fetchone(), (2, 2, 1.0, 'Completed'))
+
+    def test_od_sp_cutoff_incremental_runs_keep_decision(self):
+        """A reportable batch stays reportable in later short-window runs, and a hidden one stays hidden."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        day = 86_400 * 1_000_000
+        now_usec = int(now.timestamp() * 1_000_000)
+        cutoff = now - timedelta(days=10)
+        SP = 'SharePoint Online Enterprise Migration'
+        r = self._activity_row
+        site = 'https://tenant.sharepoint.com/sites/Inc/'
+
+        # Backfill: one batch after the cutoff, one before it.
+        self._insert_activity([
+            r(now_usec - 5 * day, 'START_MIGRATION', SP, 'inc-full', 'SPINC', 'Full'),
+            r(now_usec - 5 * day + 10, 'CREATE_FILE', SP, 'inc-full', source_name=site,
+              source_identifier='documentLibraries/dl1/files/f1', source_type='Sharepoint File'),
+            r(now_usec - 30 * day, 'START_MIGRATION', SP, 'pre-full', 'SPPRE', 'Full'),
+        ])
+        self._run_with_cutoff(cutoff, lookback_days="500")
+
+        # Later scheduled run: only new logs (the old START events are outside the 2-day window).
+        self.conn.execute("DELETE FROM activity")
+        self._insert_activity([
+            r(now_usec - 3_600_000_000, 'START_MIGRATION', SP, 'inc-delta', 'SPINC', 'Delta'),
+            r(now_usec - 3_600_000_000 + 10, 'CREATE_FILE', SP, 'inc-delta', source_name=site,
+              source_identifier='documentLibraries/dl1/files/f2', source_type='Sharepoint File'),
+            r(now_usec - 3_600_000_000, 'START_MIGRATION', SP, 'pre-delta', 'SPPRE', 'Delta'),
+            r(now_usec - 3_600_000_000 + 10, 'CREATE_FILE', SP, 'pre-delta',
+              source_name='https://tenant.sharepoint.com/sites/Pre/',
+              source_identifier='documentLibraries/dl9/files/f1', source_type='Sharepoint File'),
+        ])
+        self._run_with_cutoff(cutoff, lookback_days="2")
+
+        # Stored run details from the backfill are kept.
+        self.assertEqual(self.conn.execute(
+            "SELECT execution_type, execution_start_usec, is_reportable FROM map_execution_wave "
+            "WHERE execution_id='inc-full'").fetchone(), ('Full', now_usec - 5 * day, True))
+        self.assertEqual(self.conn.execute(
+            "SELECT is_reportable FROM map_execution_wave WHERE execution_id='pre-delta'").fetchone(), (False,))
+
+        self.assertEqual(self.conn.execute(
+            "SELECT batch_id, migrated_files_count FROM fact_file_wave_metrics").fetchall(), [('SPINC', 2)])
+        self.assertEqual(sorted(r[0] for r in self.conn.execute(
+            "SELECT batch_id FROM map_wave_details").fetchall()), ['SPINC'])
 
 if __name__ == "__main__":
     unittest.main()

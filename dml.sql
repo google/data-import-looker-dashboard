@@ -466,9 +466,9 @@ USING (
     WHERE (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
     GROUP BY m.data_type, m.batch_id, user_identifier
   ),
-  -- Per site/user and run: did the completion event arrive.
+  -- Per site/user and run: did the completion event arrive, and did the SharePoint site container fail.
   UserExecCompletions AS (
-    SELECT DISTINCT
+    SELECT
       m.batch_id,
       COALESCE(
         CASE
@@ -492,7 +492,41 @@ USING (
         a.data_migration.source_identifier
       ) AS user_identifier,
       a.data_migration.execution_id,
-      TRUE AS is_completed
+      COUNTIF(a.event_name IN ('USER_MIGRATION_COMPLETE', 'SITE_MIGRATION_COMPLETE')) > 0 AS is_completed,
+      -- Site failed in this run, following the DMS site report rules:
+      (
+        -- (a) the site container failed
+        COUNTIF(
+          a.event_name = 'CREATE_FOLDER'
+          AND IFNULL(a.data_migration.source_type, '') = 'Sharepoint Site'
+          AND a.status.event_status = 'FAILED'
+        ) > 0
+        -- (b) the site permission resolver failed (the report counts it as a failed site container)
+        OR COUNTIF(
+          a.event_name = 'CRAWL_FAILURE'
+          AND IFNULL(a.data_migration.source_type, '') = 'Sharepoint Site Permission Resolver'
+          AND a.status.event_status = 'FAILED'
+        ) > 0
+        -- (c) library-only mapping (no site container row in this run) and a document library failed
+        OR (
+          COUNTIF(
+            a.event_name = 'CREATE_FOLDER'
+            AND IFNULL(a.data_migration.source_type, '') = 'Sharepoint Site'
+          ) = 0
+          AND COUNTIF(
+            a.event_name = 'CRAWL_FAILURE'
+            AND a.status.event_status = 'FAILED'
+            AND (
+              IFNULL(a.data_migration.source_type, '') LIKE 'Sharepoint Document Library Crawler Phase%'
+              OR IFNULL(a.data_migration.source_type, '') IN ('Sharepoint Permission Crawler', 'Sharepoint Scope Crawler')
+              OR (
+                IFNULL(a.data_migration.source_type, '') = 'Sharepoint Item Crawler'
+                AND IFNULL(a.data_migration.source_identifier, '') NOT LIKE '%/folders/%'
+              )
+            )
+          ) > 0
+        )
+      ) AS is_container_failed
     FROM incremental_logs a
     JOIN `{project}.{dataset}.map_execution_wave` m ON a.data_migration.execution_id = m.execution_id AND IFNULL(m.is_reportable, TRUE)
     LEFT JOIN entity_resolution_map erm
@@ -500,13 +534,32 @@ USING (
       AND m.batch_id = erm.batch_id
       AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
     -- Exchange users and OneDrive drives send USER_MIGRATION_COMPLETE; SharePoint sites send SITE_MIGRATION_COMPLETE.
-    WHERE a.event_name IN ('USER_MIGRATION_COMPLETE', 'SITE_MIGRATION_COMPLETE')
+    WHERE (
+        a.event_name IN ('USER_MIGRATION_COMPLETE', 'SITE_MIGRATION_COMPLETE')
+        -- Every site container row (any status), so (c) can tell whether this run had one.
+        OR (
+          a.event_name = 'CREATE_FOLDER'
+          AND IFNULL(a.data_migration.source_type, '') = 'Sharepoint Site'
+        )
+        -- Site permission resolver and document-library-level discovery failures.
+        OR (
+          a.event_name = 'CRAWL_FAILURE'
+          AND (
+            IFNULL(a.data_migration.source_type, '') IN (
+              'Sharepoint Site Permission Resolver', 'Sharepoint Permission Crawler', 'Sharepoint Scope Crawler',
+              'Sharepoint Item Crawler')
+            OR IFNULL(a.data_migration.source_type, '') LIKE 'Sharepoint Document Library Crawler Phase%'
+          )
+        )
+      )
       AND (a.data_migration.source_name IS NOT NULL OR a.data_migration.source_uri IS NOT NULL OR a.data_migration.source_identifier IS NOT NULL)
+    GROUP BY m.batch_id, user_identifier, a.data_migration.execution_id
   )
   SELECT 
     b.data_type, b.batch_id, b.user_identifier,
     b.start_time_usec,
     IFNULL(c.is_completed, FALSE) AS is_completed,
+    IFNULL(c.is_container_failed, FALSE) AS is_container_failed,
     b.latest_execution_id,
     b.latest_execution_time_usec
   FROM UserBaseStats b
@@ -517,10 +570,12 @@ ON t.batch_id = s.batch_id AND t.user_identifier = s.user_identifier
 WHEN MATCHED THEN UPDATE SET
   t.start_time_usec = LEAST(t.start_time_usec, s.start_time_usec),
   t.is_completed = IF(s.latest_execution_id != IFNULL(t.latest_execution_id, ''), s.is_completed, t.is_completed OR s.is_completed),
+  -- Same rule as is_completed: follows the site's latest run (a later successful run clears an earlier failure).
+  t.is_container_failed = IF(s.latest_execution_id != IFNULL(t.latest_execution_id, ''), s.is_container_failed, IFNULL(t.is_container_failed, FALSE) OR s.is_container_failed),
   t.latest_execution_id = IF(s.latest_execution_time_usec > IFNULL(t.latest_execution_time_usec, 0), s.latest_execution_id, t.latest_execution_id),
   t.latest_execution_time_usec = GREATEST(IFNULL(t.latest_execution_time_usec, 0), s.latest_execution_time_usec)
-WHEN NOT MATCHED THEN INSERT(data_type, batch_id, user_identifier, start_time_usec, is_completed, latest_execution_id, latest_execution_time_usec)
-VALUES(s.data_type, s.batch_id, s.user_identifier, s.start_time_usec, s.is_completed, s.latest_execution_id, s.latest_execution_time_usec);
+WHEN NOT MATCHED THEN INSERT(data_type, batch_id, user_identifier, start_time_usec, is_completed, latest_execution_id, latest_execution_time_usec, is_container_failed)
+VALUES(s.data_type, s.batch_id, s.user_identifier, s.start_time_usec, s.is_completed, s.latest_execution_id, s.latest_execution_time_usec, s.is_container_failed);
 
 
 -- 3. Update Migration Errors Persistent Snapshot
@@ -619,8 +674,9 @@ USING (
       COUNTIF(
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND event_name IN ('CREATE_FILE', 'CREATE_FOLDER', 'CREATE_GMAIL_MESSAGE', 'CREATE_CALENDAR_EVENT', 'CREATE_CONTACT')
+        AND NOT (event_name = 'CREATE_FOLDER' AND IFNULL(source_type, '') = 'Sharepoint Site')
       ) AS successfully_migrated_items,
-      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items
+      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE') AND NOT (event_name = 'CREATE_FOLDER' AND IFNULL(source_type, '') = 'Sharepoint Site')) AS failed_items
     FROM OverallItems
     GROUP BY data_type
   )
@@ -702,7 +758,7 @@ USING (
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND i.event_name = 'CREATE_CONTACT'
       ) AS migrated_contacts_count,
-      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE') AND NOT (i.event_name = 'CREATE_FOLDER' AND IFNULL(i.source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         i.event_name = 'CRAWL_FAILURE'
         AND EXISTS (
@@ -836,7 +892,7 @@ USING (
         LOWER(i.event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND i.event_name = 'CREATE_CONTACT'
       ) AS migrated_contacts_count,
-      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE') AND NOT (i.event_name = 'CREATE_FOLDER' AND IFNULL(i.source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         i.event_name = 'CRAWL_FAILURE'
         AND EXISTS (
@@ -986,7 +1042,7 @@ USING (
         LOWER(event_status) IN ('succeeded', 'succeeded_with_warnings')
         AND event_name = 'CREATE_CONTACT'
       ) AS migrated_contacts_count,
-      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE') AND NOT (event_name = 'CREATE_FOLDER' AND IFNULL(source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(event_name = 'CRAWL_FAILURE') AS crawl_failure_items
     FROM UserOverallItems
     GROUP BY data_type, user_identifier
@@ -1076,7 +1132,7 @@ USING (
         AND i.event_name IN ('CREATE_FILE', 'CREATE_FOLDER')
         AND (i.event_name != 'CREATE_FOLDER' OR IFNULL(i.source_type, '') != 'Sharepoint Site')
       ) AS total_items_migrated,
-      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE') AND NOT (i.event_name = 'CREATE_FOLDER' AND IFNULL(i.source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         i.event_name = 'CRAWL_FAILURE'
         AND EXISTS (
@@ -1103,12 +1159,7 @@ USING (
       migrated_document_libraries_count,
       total_items_migrated,
       failed_items,
-      crawl_failure_items,
-      CASE
-        WHEN IFNULL(total_items_migrated, 0) = 0 AND (IFNULL(failed_items, 0) > 0 OR IFNULL(crawl_failure_items, 0) > 0) THEN 'Failed'
-        WHEN IFNULL(total_items_migrated, 0) > 0 THEN 'Completed'
-        ELSE 'Running'
-      END AS entity_status
+      crawl_failure_items
     FROM EntityMetrics
   ),
   WaveEntityStats AS (
@@ -1117,9 +1168,11 @@ USING (
       u.batch_id,
       MIN(TIMESTAMP_MICROS(u.start_time_usec)) AS start_date,
       COUNT(DISTINCT u.user_identifier) AS entity_count,
-      -- Processed sites: completion event received for the site's latest run.
-      COUNTIF(u.is_completed) AS completed_entity_count,
-      COUNTIF(e.entity_status = 'Failed') AS failed_entity_count,
+      -- Processed sites: completion event received for the site's latest run, or the site failed (a failed
+      -- library-only site or OneDrive never sends the completion event, but has finished processing).
+      COUNTIF(u.is_completed OR IFNULL(u.is_container_failed, FALSE)) AS completed_entity_count,
+      -- Failed sites: the site failed in its latest run (DMS site report rules).
+      COUNTIF(IFNULL(u.is_container_failed, FALSE)) AS failed_entity_count,
       SUM(IFNULL(e.migrated_files_count, 0)) AS migrated_files_count,
       SUM(IFNULL(e.migrated_folders_count, 0)) AS migrated_folders_count,
       SUM(IFNULL(e.migrated_document_libraries_count, 0)) AS migrated_document_libraries_count,
@@ -1164,8 +1217,8 @@ USING (
     IFNULL(SAFE_DIVIDE(u.completed_entity_count, u.entity_count), 0) AS completion_percentage,
     IFNULL(SAFE_DIVIDE(IFNULL(u.successfully_migrated_items, 0) + IFNULL(u.failed_items, 0), u.entity_count), 0) AS avg_items_per_entity,
     CASE
-      WHEN u.entity_count > 0 AND u.completed_entity_count = 0 AND u.failed_entity_count > 0 THEN 'Failed'
-      WHEN u.entity_count > 0 AND u.entity_count = u.completed_entity_count THEN 'Completed'
+      WHEN u.entity_count > 0 AND u.failed_entity_count = u.entity_count THEN 'Failed'
+      WHEN u.entity_count > 0 AND u.completed_entity_count = u.entity_count THEN 'Completed'
       ELSE 'Running'
     END AS status
   FROM WaveBase w
@@ -1233,6 +1286,7 @@ USING (
       u.batch_id,
       u.user_identifier AS entity_identifier,
       u.is_completed,
+      IFNULL(u.is_container_failed, FALSE) AS is_container_failed,
       ANY_VALUE(m.batch_name) AS batch_name,
       ANY_VALUE(m.batch_filter) AS batch_filter
     FROM `{project}.{dataset}.snapshot_user_wave` u
@@ -1240,7 +1294,7 @@ USING (
       ON u.batch_id = m.batch_id AND u.data_type = m.data_type
     WHERE u.batch_id IN (SELECT batch_id FROM active_batches)
       AND u.data_type IN ('OneDrive Enterprise Migration', 'SharePoint Online Enterprise Migration')
-    GROUP BY u.data_type, u.batch_id, entity_identifier, u.is_completed
+    GROUP BY u.data_type, u.batch_id, entity_identifier, u.is_completed, is_container_failed
   ),
   ItemCounts AS (
     SELECT
@@ -1266,7 +1320,7 @@ USING (
              AND LOWER(i.source_identifier) LIKE 'documentlibraries/%'
         THEN REGEXP_EXTRACT(i.source_identifier, r'^(documentLibraries/[^/]+)')
       END) AS migrated_document_libraries_count,
-      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE') AND NOT (i.event_name = 'CREATE_FOLDER' AND IFNULL(i.source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         i.event_name = 'CRAWL_FAILURE'
         AND EXISTS (
@@ -1302,8 +1356,8 @@ USING (
         i.total_items_migrated + IFNULL(i.failed_items, 0)),
       0) AS success_rate_percentage,
     CASE
-      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
-      -- Completed only when the site's completion event was received (same as the DMS site report).
+      -- Same as the DMS site report: failed site container -> Failed; site processed (completion event) -> Completed.
+      WHEN b.is_container_failed THEN 'Failed'
       WHEN b.is_completed THEN 'Completed'
       ELSE 'Running'
     END AS status
@@ -1367,6 +1421,7 @@ USING (
       u.data_type,
       u.user_identifier AS entity_identifier,
       LOGICAL_AND(u.is_completed) AS is_completed,
+      LOGICAL_OR(IFNULL(u.is_container_failed, FALSE)) AS is_container_failed,
       ANY_VALUE(m.batch_filter) AS batch_filter
     FROM `{project}.{dataset}.snapshot_user_wave` u
     LEFT JOIN `{project}.{dataset}.map_execution_wave` m
@@ -1419,7 +1474,7 @@ USING (
              AND LOWER(source_identifier) LIKE 'documentlibraries/%'
         THEN REGEXP_EXTRACT(source_identifier, r'^(documentLibraries/[^/]+)')
       END) AS migrated_document_libraries_count,
-      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE')) AS failed_items,
+      COUNTIF(event_status = 'FAILED' AND event_name NOT IN ('CRAWL_FAILURE') AND NOT (event_name = 'CREATE_FOLDER' AND IFNULL(source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         event_name = 'CRAWL_FAILURE'
         AND EXISTS (
@@ -1447,8 +1502,8 @@ USING (
         i.total_items_migrated + IFNULL(i.failed_items, 0)),
       0) AS success_rate_percentage,
     CASE
-      WHEN IFNULL(i.total_items_migrated, 0) = 0 AND (IFNULL(i.failed_items, 0) > 0 OR IFNULL(i.crawl_failure_items, 0) > 0) THEN 'Failed'
-      -- Completed only when the site's completion event was received (same as the DMS site report).
+      -- Same as the DMS site report: failed site container -> Failed; site processed (completion event) -> Completed.
+      WHEN b.is_container_failed THEN 'Failed'
       WHEN b.is_completed THEN 'Completed'
       ELSE 'Running'
     END AS status
