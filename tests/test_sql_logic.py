@@ -1805,6 +1805,97 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(self.conn.execute(
             "SELECT status FROM fact_file_wave_metrics WHERE batch_id='SPC'").fetchone(), ('Completed',))
 
+    def test_file_versions_count_once_per_file(self):
+        """File version rows (".../versions/<n>") are grouped under their file; older versions are not extra files."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        now_usec = int(now.timestamp() * 1_000_000)
+        SP = 'SharePoint Online Enterprise Migration'
+        site = 'https://tenant.sharepoint.com/sites/Ver/'
+        r = self._activity_row
+        lib = 'documentLibraries/dl1/files/'
+
+        def row(t, event, exec_id, file_id, status='SUCCEEDED', code=None):
+            return r(now_usec - 100_000 + t, event, SP, exec_id, source_name=site,
+                     source_identifier=lib + file_id,
+                     source_type='Sharepoint File Version' if event == 'CREATE_FILE_VERSION' else 'Sharepoint File',
+                     status=status, error_code=code, error_title='Err' if code else None)
+
+        self._insert_activity([
+            r(now_usec - 200_000, 'START_MIGRATION', SP, 'v-full', 'SPVER', 'Full'),
+            # Site container row: not a customer item, must not appear in the timeline or folder counts.
+            r(now_usec - 150_000, 'CREATE_FOLDER', SP, 'v-full', source_name=site,
+              source_identifier='sites/' + site, source_type='Sharepoint Site'),
+            # A: current 2.0 + older 1.0, all succeeded (older version also logs CREATE_FILE .../versions/1.0).
+            row(1, 'CREATE_FILE_VERSION', 'v-full', 'A/versions/2.0'),
+            row(2, 'CREATE_FILE', 'v-full', 'A', 'SUCCEEDED_WITH_WARNINGS'),
+            row(3, 'CREATE_FILE_VERSION', 'v-full', 'A/versions/1.0'),
+            row(4, 'CREATE_FILE', 'v-full', 'A/versions/1.0'),
+            # B: current version upload failed, no CREATE_FILE row at all -> 1 failed file.
+            row(5, 'CREATE_FILE_VERSION', 'v-full', 'B/versions/1.0', 'FAILED', 'T009'),
+            # C: upload succeeded but the file step failed -> 1 failed file (must not be hidden by the version success).
+            row(6, 'CREATE_FILE_VERSION', 'v-full', 'C/versions/1.0'),
+            row(7, 'CREATE_FILE', 'v-full', 'C', 'FAILED', 'T010'),
+            # D: file succeeded, an older version failed -> 0 failed files.
+            row(8, 'CREATE_FILE_VERSION', 'v-full', 'D/versions/2.0'),
+            row(9, 'CREATE_FILE', 'v-full', 'D'),
+            row(10, 'CREATE_FILE_VERSION', 'v-full', 'D/versions/1.0', 'FAILED', 'T011'),
+            row(11, 'CREATE_FILE', 'v-full', 'D/versions/1.0', 'FAILED', 'T011'),
+            # E: failed in the Full run, succeeded in a later delta -> failure cleared.
+            row(12, 'CREATE_FILE_VERSION', 'v-full', 'E/versions/1.0', 'FAILED', 'T009'),
+            r(now_usec - 50_000, 'START_MIGRATION', SP, 'v-delta', 'SPVER', 'Delta'),
+            row(60_000, 'CREATE_FILE_VERSION', 'v-delta', 'E/versions/1.0'),
+            row(60_001, 'CREATE_FILE', 'v-delta', 'E'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        # Snapshot holds one item per file, keyed by the file's own ID.
+        items = dict(self.conn.execute(
+            "SELECT source_identifier, event_status FROM snapshot_item_user_wave "
+            "WHERE batch_id='SPVER' AND source_identifier LIKE 'documentLibraries/%'").fetchall())
+        self.assertEqual(sorted(items), [lib + f for f in 'ABCDE'])
+        self.assertEqual(items[lib + 'B'], 'FAILED')
+        self.assertEqual(items[lib + 'C'], 'FAILED')
+        self.assertIn(items[lib + 'D'].lower(), ('succeeded', 'succeeded_with_warnings'))
+        self.assertIn(items[lib + 'E'].lower(), ('succeeded', 'succeeded_with_warnings'))
+
+        self.assertEqual(self.conn.execute(
+            "SELECT migrated_files_count, failed_items, total_items FROM fact_entity_file_wave_metrics "
+            "WHERE batch_id='SPVER'").fetchone(), (3, 2, 5))
+        self.assertEqual(self.conn.execute(
+            "SELECT migrated_files_count, successfully_migrated_items, total_migrated_items FROM fact_file_wave_metrics "
+            "WHERE batch_id='SPVER'").fetchone(), (3, 3, 5))
+        # Timeline: A, D and E once each; no older-version CREATE_FILE rows, no version rows, no site container.
+        self.assertEqual(self.conn.execute(
+            "SELECT SUM(items_migrated) FROM fact_migration_timeline WHERE batch_id='SPVER'").fetchone(), (3,))
+
+    def test_crawl_failure_does_not_hide_failed_item_with_same_id(self):
+        """A failed folder and the crawl failure for its children (same ID) are both counted, as in the site report."""
+        self.run_sql_file(self.ddl_path)
+        now = datetime.utcnow()
+        now_usec = int(now.timestamp() * 1_000_000)
+        SP = 'SharePoint Online Enterprise Migration'
+        site = 'https://tenant.sharepoint.com/sites/Crawl'
+        folder = 'documentLibraries/dl1/folders/f-bad'
+        r = self._activity_row
+        self._insert_activity([
+            r(now_usec - 100_000, 'START_MIGRATION', SP, 'cr-full', 'SPCRAWL', 'Full'),
+            r(now_usec - 90_000, 'CREATE_FOLDER', SP, 'cr-full', source_name=site,
+              source_identifier='documentLibraries/dl1/folders/f-ok', source_type='Sharepoint Folder'),
+            r(now_usec - 80_000, 'CREATE_FOLDER', SP, 'cr-full', source_name=site, source_identifier=folder,
+              source_type='Sharepoint Folder', status='FAILED', error_code='T007', error_title='UserNotFound'),
+            # Logged later, same ID: children of the failed folder could not be crawled.
+            r(now_usec - 10_000, 'CRAWL_FAILURE', SP, 'cr-full', source_name=site, source_identifier=folder,
+              source_type='Sharepoint Item Crawler', status='FAILED', error_code='P009', error_title='FailedToCrawl'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+        self.assertEqual(self.conn.execute(
+            "SELECT migrated_folders_count, failed_items, crawl_failure_items, total_items "
+            "FROM fact_entity_file_wave_metrics WHERE batch_id='SPCRAWL'").fetchone(), (1, 1, 1, 2))
+        self.assertEqual(self.conn.execute(
+            "SELECT successfully_migrated_items, total_migrated_items FROM fact_file_wave_metrics "
+            "WHERE batch_id='SPCRAWL'").fetchone(), (1, 2))
+
 if __name__ == "__main__":
     unittest.main()
 
