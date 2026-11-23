@@ -48,7 +48,7 @@ echo ""
 # Disclaimer and Terms Acknowledgment
 # ----------------------------------------------------------
 cat << 'EOF'
-Project Overview: The Exchange Online Data Import Analytics Dashboard project provides an automated deployment solution for monitoring of large-scale migrations using BigQuery and Looker Studio.
+Project Overview: The Data Import Analytics Dashboard project (Exchange Online, OneDrive and SharePoint) provides an automated deployment solution for monitoring of large-scale migrations using BigQuery and Looker Studio.
 
 Data Accuracy Notice: The dashboard is offered "AS-IS" as an experimental feature and should not be relied on for business outcomes or hard migration timelines. The accuracy of the dashboard may vary and relies on, among other things, a correct BigQuery export setup and the underlying data within the customer's instance. The customer maintains full control over this configuration and data, the dashboard cannot guarantee migration statistics.
 
@@ -131,16 +131,23 @@ DDL_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
                  -e "s/{dataset}/${DMS_DATASET}/g" \
                  ddl.sql)
 
+# OneDrive / SharePoint cutoff: only OneDrive and SharePoint batches whose first (Full) run started on or after
+# this time are reported. Set it to a few days after the last backend audit-log change is live in all regions.
+# Changing it later requires re-running this script (tables are rebuilt).
+OD_SP_CUTOFF="2026-11-21 00:00:00+00"
+
 # Process DML Backfill (uses 365 days)
 DML_BACKFILL_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
                  -e "s/{dataset}/${DMS_DATASET}/g" \
                  -e "s/{lookback_days}/365/g" \
+                 -e "s/{od_sp_cutoff}/${OD_SP_CUTOFF}/g" \
                  dml.sql)
 
 # Process DML Scheduled (uses 2 days)
 DML_SCHEDULED_QUERY=$(sed -e "s/{project}/${PROJECT_ID}/g" \
                  -e "s/{dataset}/${DMS_DATASET}/g" \
                  -e "s/{lookback_days}/2/g" \
+                 -e "s/{od_sp_cutoff}/${OD_SP_CUTOFF}/g" \
                  dml.sql)
 
 # ----------------------------------------------------------
@@ -211,9 +218,9 @@ echo ""
 # ----------------------------------------------------------
 # 6. Generate Magic Link
 # ----------------------------------------------------------
-MASTER_REPORT_ID="3610231e-b36b-4890-83d5-f90c3dbe776d"
+MASTER_REPORT_ID="02f555be-da1d-4943-a184-97567eb33e94"
 
-MAGIC_LINK="https://lookerstudio.google.com/reporting/create?c.reportId=$MASTER_REPORT_ID&ds.ds0.connector=bigQuery&ds.ds0.type=TABLE&ds.ds0.projectId=$PROJECT_ID&ds.ds0.datasetId=$DMS_DATASET&ds.ds0.tableId=map_wave_details&ds.ds1.connector=bigQuery&ds.ds1.type=TABLE&ds.ds1.projectId=$PROJECT_ID&ds.ds1.datasetId=$DMS_DATASET&ds.ds1.tableId=fact_datatype_metrics&ds.ds2.connector=bigQuery&ds.ds2.type=TABLE&ds.ds2.projectId=$PROJECT_ID&ds.ds2.datasetId=$DMS_DATASET&ds.ds2.tableId=fact_wave_metrics&ds.ds3.connector=bigQuery&ds.ds3.type=TABLE&ds.ds3.projectId=$PROJECT_ID&ds.ds3.datasetId=$DMS_DATASET&ds.ds3.tableId=fact_user_wave_metrics&ds.ds4.connector=bigQuery&ds.ds4.type=TABLE&ds.ds4.projectId=$PROJECT_ID&ds.ds4.datasetId=$DMS_DATASET&ds.ds4.tableId=fact_migration_timeline&ds.ds5.connector=bigQuery&ds.ds5.type=TABLE&ds.ds5.projectId=$PROJECT_ID&ds.ds5.datasetId=$DMS_DATASET&ds.ds5.tableId=fact_user_overall_metrics&ds.ds6.connector=bigQuery&ds.ds6.type=TABLE&ds.ds6.projectId=$PROJECT_ID&ds.ds6.datasetId=$DMS_DATASET&ds.ds6.tableId=fact_migration_errors&ds.ds7.connector=bigQuery&ds.ds7.type=TABLE&ds.ds7.projectId=$PROJECT_ID&ds.ds7.datasetId=$DMS_DATASET&ds.ds7.tableId=fact_top_errors"
+MAGIC_LINK="https://lookerstudio.google.com/reporting/create?c.reportId=$MASTER_REPORT_ID&ds.ds0.connector=bigQuery&ds.ds0.type=TABLE&ds.ds0.projectId=$PROJECT_ID&ds.ds0.datasetId=$DMS_DATASET&ds.ds0.tableId=map_wave_details&ds.ds1.connector=bigQuery&ds.ds1.type=TABLE&ds.ds1.projectId=$PROJECT_ID&ds.ds1.datasetId=$DMS_DATASET&ds.ds1.tableId=fact_datatype_metrics&ds.ds2.connector=bigQuery&ds.ds2.type=TABLE&ds.ds2.projectId=$PROJECT_ID&ds.ds2.datasetId=$DMS_DATASET&ds.ds2.tableId=fact_wave_metrics&ds.ds3.connector=bigQuery&ds.ds3.type=TABLE&ds.ds3.projectId=$PROJECT_ID&ds.ds3.datasetId=$DMS_DATASET&ds.ds3.tableId=fact_user_wave_metrics&ds.ds4.connector=bigQuery&ds.ds4.type=TABLE&ds.ds4.projectId=$PROJECT_ID&ds.ds4.datasetId=$DMS_DATASET&ds.ds4.tableId=fact_migration_timeline&ds.ds5.connector=bigQuery&ds.ds5.type=TABLE&ds.ds5.projectId=$PROJECT_ID&ds.ds5.datasetId=$DMS_DATASET&ds.ds5.tableId=fact_user_overall_metrics&ds.ds6.connector=bigQuery&ds.ds6.type=TABLE&ds.ds6.projectId=$PROJECT_ID&ds.ds6.datasetId=$DMS_DATASET&ds.ds6.tableId=fact_migration_errors&ds.ds7.connector=bigQuery&ds.ds7.type=TABLE&ds.ds7.projectId=$PROJECT_ID&ds.ds7.datasetId=$DMS_DATASET&ds.ds7.tableId=fact_top_errors&ds.ds8.connector=bigQuery&ds.ds8.type=TABLE&ds.ds8.projectId=$PROJECT_ID&ds.ds8.datasetId=$DMS_DATASET&ds.ds8.tableId=fact_file_wave_metrics&ds.ds9.connector=bigQuery&ds.ds9.type=TABLE&ds.ds9.projectId=$PROJECT_ID&ds.ds9.datasetId=$DMS_DATASET&ds.ds9.tableId=fact_entity_file_wave_metrics&ds.ds10.connector=bigQuery&ds.ds10.type=TABLE&ds.ds10.projectId=$PROJECT_ID&ds.ds10.datasetId=$DMS_DATASET&ds.ds10.tableId=fact_entity_file_overall_metrics"
 echo "=========================================================="
 echo "✅ DEPLOYMENT COMPLETE"
 echo "=========================================================="
