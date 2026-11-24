@@ -1684,7 +1684,7 @@ class TestSQLLogicLocal(unittest.TestCase):
             "SELECT migrated_files_count FROM fact_file_wave_metrics WHERE batch_id='SPNEW'").fetchone(), (1,))
 
     def test_site_completion_event_drives_site_status(self):
-        """Site status follows the completion event: SITE_MIGRATION_COMPLETE (SP) / USER_MIGRATION_COMPLETE (OD)."""
+        """Site status follows the completion event: SITE_MIGRATION_COMPLETE (SharePoint sites and OneDrives)."""
         self.run_sql_file(self.ddl_path)
         now = datetime.utcnow()
         now_usec = int(now.timestamp() * 1_000_000)
@@ -1705,10 +1705,11 @@ class TestSQLLogicLocal(unittest.TestCase):
             file_row(now_usec - 10 * hour + 2, SP, 'sp-full', sp_open, 2),
             r(now_usec - 9 * hour, 'SITE_MIGRATION_COMPLETE', SP, 'sp-full', source_name=sp_done,
               source_identifier='sites/' + sp_done, source_type='Sharepoint Site'),
-            # OneDrive batch: drive finished with the reused USER_MIGRATION_COMPLETE event.
+            # OneDrive batch: drive finished with SITE_MIGRATION_COMPLETE.
             r(now_usec - 10 * hour, 'START_MIGRATION', OD, 'od-full', 'ODC', 'Full'),
             file_row(now_usec - 10 * hour + 1, OD, 'od-full', od_user, 3),
-            r(now_usec - 9 * hour, 'USER_MIGRATION_COMPLETE', OD, 'od-full', source_name=od_user),
+            r(now_usec - 9 * hour, 'SITE_MIGRATION_COMPLETE', OD, 'od-full', source_name=od_user,
+              source_identifier='sites/' + od_user, source_type='Sharepoint Site'),
         ])
         self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
 
