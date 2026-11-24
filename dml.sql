@@ -533,7 +533,7 @@ USING (
       ON a.data_migration.migration_type = erm.data_type
       AND m.batch_id = erm.batch_id
       AND REGEXP_EXTRACT(a.data_migration.source_identifier, r'^([^/]+/[^/]+)') = erm.root_key
-    -- Exchange users and OneDrive drives send USER_MIGRATION_COMPLETE; SharePoint sites send SITE_MIGRATION_COMPLETE.
+    -- Exchange users send USER_MIGRATION_COMPLETE; SharePoint sites and OneDrives send SITE_MIGRATION_COMPLETE.
     WHERE (
         a.event_name IN ('USER_MIGRATION_COMPLETE', 'SITE_MIGRATION_COMPLETE')
         -- Every site container row (any status), so (c) can tell whether this run had one.
