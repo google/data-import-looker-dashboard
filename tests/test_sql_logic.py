@@ -2057,6 +2057,45 @@ class TestSQLLogicLocal(unittest.TestCase):
         self.assertEqual(sorted(r[0] for r in self.conn.execute(
             "SELECT batch_id FROM map_wave_details").fetchall()), ['SPINC'])
 
+    def test_exchange_crawl_failure_uses_users_latest_run(self):
+        """A user's discovery failures count from the user's own latest run, even if a later delta run of the
+        batch did not include that user (matches the overall user page and the DMS report)."""
+        self.run_sql_file(self.ddl_path)
+        now_usec = int(datetime.utcnow().timestamp() * 1_000_000)
+        hour = 3_600 * 1_000_000
+        EX = 'Exchange Online Migration'
+        r = self._activity_row
+        self._insert_activity([
+            # Full run: user A only has root discovery failures; user B migrates a message.
+            r(now_usec - 10 * hour, 'START_MIGRATION', EX, 'ex-full', 'EXW', 'Full'),
+            r(now_usec - 10 * hour + 1, 'CRAWL_FAILURE', EX, 'ex-full', source_name='a@example.com',
+              source_identifier='mailboxes/a@example.com', source_type='Exchange Online Email Folder Crawler',
+              status='FAILED', error_code='C001', error_title='FailedToCrawl'),
+            r(now_usec - 10 * hour + 2, 'USER_MIGRATION_COMPLETE', EX, 'ex-full', source_name='a@example.com',
+              event_type='SUCCESS'),
+            r(now_usec - 10 * hour + 3, 'CREATE_GMAIL_MESSAGE', EX, 'ex-full', source_name='b@example.com',
+              source_identifier='msg-1', source_type='Exchange Online Email Message'),
+            r(now_usec - 10 * hour + 4, 'USER_MIGRATION_COMPLETE', EX, 'ex-full', source_name='b@example.com',
+              event_type='SUCCESS'),
+            # Delta run of the same batch includes only user B.
+            r(now_usec - 2 * hour, 'START_MIGRATION', EX, 'ex-delta', 'EXW', 'Delta'),
+            r(now_usec - 2 * hour + 1, 'CREATE_GMAIL_MESSAGE', EX, 'ex-delta', source_name='b@example.com',
+              source_identifier='msg-2', source_type='Exchange Online Email Message'),
+            r(now_usec - 2 * hour + 2, 'USER_MIGRATION_COMPLETE', EX, 'ex-delta', source_name='b@example.com',
+              event_type='SUCCESS'),
+        ])
+        self.run_sql_file(self.dml_path, replacements={"{lookback_days}": "2"})
+
+        rows = dict((u, (c, st)) for u, c, st in self.conn.execute(
+            "SELECT user_identifier, crawl_failure_items, status FROM fact_user_wave_metrics WHERE batch_id='EXW'"
+        ).fetchall())
+        self.assertEqual(rows['a@example.com'], (1, 'Failed'))
+        self.assertEqual(rows['b@example.com'], (0, 'Completed'))
+        # The overall user page agrees.
+        self.assertEqual(self.conn.execute(
+            "SELECT status FROM fact_user_overall_metrics WHERE user_identifier='a@example.com'").fetchone(),
+            ('Failed',))
+
 if __name__ == "__main__":
     unittest.main()
 

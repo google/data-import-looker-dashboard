@@ -761,12 +761,8 @@ USING (
       COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE') AND NOT (i.event_name = 'CREATE_FOLDER' AND IFNULL(i.source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         i.event_name = 'CRAWL_FAILURE'
-        AND EXISTS (
-          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
-          WHERE m.batch_id = i.batch_id
-            AND m.execution_id = i.execution_id
-            AND m.is_latest_execution = TRUE
-        )
+        -- Discovery failures from the user's own latest run (a user may not be part of the batch's latest delta run).
+        AND (i.execution_id = u.latest_execution_id OR u.latest_execution_id IS NULL)
       ) AS crawl_failure_items
     FROM `{project}.{dataset}.snapshot_item_user_wave` i
     JOIN `{project}.{dataset}.snapshot_user_wave` u ON i.batch_id = u.batch_id AND i.user_identifier = u.user_identifier AND i.data_type = u.data_type
@@ -895,12 +891,8 @@ USING (
       COUNTIF(i.event_status = 'FAILED' AND i.event_name NOT IN ('CRAWL_FAILURE') AND NOT (i.event_name = 'CREATE_FOLDER' AND IFNULL(i.source_type, '') = 'Sharepoint Site')) AS failed_items,
       COUNTIF(
         i.event_name = 'CRAWL_FAILURE'
-        AND EXISTS (
-          SELECT 1 FROM `{project}.{dataset}.map_execution_wave` m
-          WHERE m.batch_id = i.batch_id
-            AND m.execution_id = i.execution_id
-            AND m.is_latest_execution = TRUE
-        )
+        -- Discovery failures from the user's own latest run (a user may not be part of the batch's latest delta run).
+        AND (i.execution_id = u.latest_execution_id OR u.latest_execution_id IS NULL)
       ) AS crawl_failure_items
     FROM `{project}.{dataset}.snapshot_item_user_wave` i
     JOIN `{project}.{dataset}.snapshot_user_wave` u
